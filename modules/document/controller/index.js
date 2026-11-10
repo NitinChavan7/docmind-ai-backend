@@ -315,7 +315,9 @@ class DocumentController {
       }
 
       // 4. Download PDF from Supabase
+      console.log("[PDF] Downloading from Supabase");
       const pdfBuffer = await downloadPdf(objectKey);
+      console.log("[PDF] Supabase download successful");
 
       // 5. Create a temporary directory for PDF extraction
       temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "docmind-"));
@@ -330,7 +332,9 @@ class DocumentController {
       processingStarted = true;
 
       // 7. Extract PDF text
+      console.log("[PDF] Extracting text");
       const result = await extractPdfText(filePath);
+      console.log("[PDF] Text extraction successful");
 
       // 8. Split extracted text into chunks
       const chunks = splitTextIntoChunks(result.pages, documentId);
@@ -342,10 +346,14 @@ class DocumentController {
       // 9. Generate embeddings
       const texts = chunks.map((chunk) => chunk.content);
 
+      console.log("[PDF] Generating embeddings");
       const embeddings = await generateEmbeddings(texts);
+      console.log("[PDF] Embeddings generated:", embeddings.length);
 
       // 10. Store embeddings in the vector database
+      console.log("[PDF] Storing vectors");
       const vectorResult = await storeDocumentChunks(chunks, embeddings);
+      console.log("[PDF] Vector storage successful");
 
       // 11. Mark document as ready
       await updateDocumentStatus(
@@ -370,6 +378,8 @@ class DocumentController {
       console.error("PDF processing failed:", {
         name: error.name,
         message: error.message,
+        cause: error.cause?.message,
+        code: error.cause?.code,
         stack: error.stack,
       });
 
