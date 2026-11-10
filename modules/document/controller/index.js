@@ -3,7 +3,7 @@ const fs = require("fs/promises");
 const path = require("path");
 const { extractPdfText } = require("../services/pdf.service");
 const { splitTextIntoChunks } = require("../services/chunk.service");
-const { generateEmbeddings } = require("../../rag/services/embedding.service");
+// const { generateEmbeddings } = require("../../rag/services/embedding.service");
 const os = require("os");
 
 const {
@@ -231,7 +231,9 @@ class DocumentController {
   async deleteDocument(req, res) {
     try {
       const { documentId } = req.params;
+      const userId = req.user.id;
 
+      // 1. Validate MongoDB document ID
       if (!mongoose.isValidObjectId(documentId)) {
         return res.status(400).json({
           success: false,
@@ -239,7 +241,8 @@ class DocumentController {
         });
       }
 
-      const document = await getDocumentById(documentId, req.user.id);
+      // 2. Verify that the document belongs to this user
+      const document = await getDocumentById(documentId, userId);
 
       if (!document) {
         return res.status(404).json({
@@ -248,26 +251,35 @@ class DocumentController {
         });
       }
 
-      // Remove existing search vectors.
-      if (document.status !== "uploaded") {
-        await deleteDocumentChunks(documentId);
-      }
+      // 3. Delete document vectors from Qdrant Cloud.
+      // Also clean up possible partial indexing attempts.
+      console.log("[Document] Deleting Qdrant vectors");
 
-      // Delete private cloud object for migrated documents.
+      await deleteDocumentChunks(documentId, userId);
+
+      // 4. Delete the PDF from private Supabase Storage
       const objectKey = document.filePath;
 
-      if (objectKey && objectKey.startsWith(`${req.user.id}/`)) {
+      if (typeof objectKey === "string" && objectKey.startsWith(`${userId}/`)) {
+        console.log("[Document] Deleting PDF from Supabase");
         await deletePdf(objectKey);
       }
 
-      await deleteDocumentById(documentId, req.user.id);
+      // 5. Delete document metadata from MongoDB Atlas
+      await deleteDocumentById(documentId, userId);
+
+      console.log("[Document] Document deleted successfully");
 
       return res.status(200).json({
         success: true,
         message: "Document deleted successfully",
       });
     } catch (error) {
-      console.error("Delete document error:", error.message);
+      console.error("Delete document error:", {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+      });
 
       return res.status(500).json({
         success: false,
@@ -278,11 +290,15 @@ class DocumentController {
 
   async processDocument(req, res) {
     const { documentId } = req.params;
+
     let processingStarted = false;
     let temporaryDirectory = null;
 
     try {
-      // 1. Validate document ID
+      // ============================================
+      // STEP 1: Validate MongoDB document ID
+      // ============================================
+
       if (!mongoose.isValidObjectId(documentId)) {
         return res.status(400).json({
           success: false,
@@ -290,7 +306,10 @@ class DocumentController {
         });
       }
 
-      // 2. Get the document owned by the logged-in user
+      // ============================================
+      // STEP 2: Verify document ownership
+      // ============================================
+
       const document = await getDocumentById(documentId, req.user.id);
 
       if (!document) {
@@ -300,10 +319,12 @@ class DocumentController {
         });
       }
 
-      // 3. Get the private Supabase object key
+      // ============================================
+      // STEP 3: Validate Supabase storage key
+      // ============================================
+
       const objectKey = document.filePath;
 
-      // Reject legacy documents stored only on local disk
       if (
         typeof objectKey !== "string" ||
         !objectKey.startsWith(`${req.user.id}/`)
@@ -314,54 +335,125 @@ class DocumentController {
         });
       }
 
-      // 4. Download PDF from Supabase
-      console.log("[PDF] Downloading from Supabase");
-      const pdfBuffer = await downloadPdf(objectKey);
-      console.log("[PDF] Supabase download successful");
+      // ============================================
+      // STEP 4: Download PDF from Supabase Storage
+      // ============================================
 
-      // 5. Create a temporary directory for PDF extraction
+      console.log("[PDF] Downloading document from Supabase");
+
+      const pdfBuffer = await downloadPdf(objectKey);
+
+      if (!Buffer.isBuffer(pdfBuffer) || pdfBuffer.length === 0) {
+        throw new Error("Downloaded PDF is empty or invalid");
+      }
+
+      console.log(
+        "[PDF] Download successful. Size:",
+        pdfBuffer.length,
+        "bytes",
+      );
+
+      // ============================================
+      // STEP 5: Create temporary PDF file
+      // ============================================
+
       temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "docmind-"));
 
       const filePath = path.join(temporaryDirectory, "document.pdf");
 
       await fs.writeFile(filePath, pdfBuffer);
 
-      // 6. Mark document as processing
+      console.log("[PDF] Temporary file created");
+
+      // ============================================
+      // STEP 6: Mark document as processing
+      // ============================================
+
       await updateDocumentStatus(documentId, req.user.id, "processing");
 
       processingStarted = true;
 
-      // 7. Extract PDF text
-      console.log("[PDF] Extracting text");
-      const result = await extractPdfText(filePath);
-      console.log("[PDF] Text extraction successful");
+      // ============================================
+      // STEP 7: Extract PDF text
+      // ============================================
 
-      // 8. Split extracted text into chunks
+      console.log("[PDF] Extracting text");
+
+      const result = await extractPdfText(filePath);
+
+      if (
+        !result ||
+        !Array.isArray(result.pages) ||
+        result.pages.length === 0
+      ) {
+        throw new Error("PDF text extraction returned no pages");
+      }
+
+      console.log("[PDF] Text extraction successful. Pages:", result.pageCount);
+
+      // ============================================
+      // STEP 8: Split PDF text into chunks
+      // ============================================
+
+      console.log("[PDF] Splitting document into chunks");
+
       const chunks = splitTextIntoChunks(result.pages, documentId);
 
-      if (chunks.length === 0) {
+      if (!Array.isArray(chunks) || chunks.length === 0) {
         throw new Error("No searchable text found in PDF");
       }
 
-      // 9. Generate embeddings
-      const texts = chunks.map((chunk) => chunk.content);
+      console.log("[PDF] Total chunks generated:", chunks.length);
 
-      console.log("[PDF] Generating embeddings");
-      const embeddings = await generateEmbeddings(texts);
-      console.log("[PDF] Embeddings generated:", embeddings.length);
+      // ============================================
+      // STEP 9: Validate embedding input
+      // ============================================
 
-      // 10. Store embeddings in the vector database
-      console.log("[PDF] Storing vectors");
-      const vectorResult = await storeDocumentChunks(chunks, embeddings);
-      console.log("[PDF] Vector storage successful");
+      for (const chunk of chunks) {
+        if (typeof chunk.content !== "string" || !chunk.content.trim()) {
+          throw new Error("Document contains an empty text chunk");
+        }
+      }
 
-      // 11. Mark document as ready
+      // Qdrant Cloud's MiniLM model generates 384-dimensional
+      // embeddings directly from the chunk text.
+      //
+      // Do NOT call generateEmbeddings() or local Ollama.
+
+      // ============================================
+      // STEP 10: Store chunks in Qdrant Cloud
+      // ============================================
+
+      console.log("[PDF] Sending chunks to Qdrant Cloud Inference");
+
+      const vectorResult = await storeDocumentChunks(chunks, req.user.id);
+
+      if (!vectorResult || vectorResult.storedChunks !== chunks.length) {
+        throw new Error("Qdrant did not confirm all document chunks");
+      }
+
+      console.log(
+        "[PDF] Qdrant indexing completed:",
+        vectorResult.storedChunks,
+        "vectors",
+      );
+
+      // ============================================
+      // STEP 11: Update MongoDB document status
+      // ============================================
+
       await updateDocumentStatus(
         documentId,
         req.user.id,
         "ready",
         result.pageCount,
       );
+
+      console.log("[PDF] Document marked as ready");
+
+      // ============================================
+      // STEP 12: Return successful API response
+      // ============================================
 
       return res.status(200).json({
         success: true,
@@ -375,6 +467,10 @@ class DocumentController {
         },
       });
     } catch (error) {
+      // ============================================
+      // ERROR HANDLING
+      // ============================================
+
       console.error("PDF processing failed:", {
         name: error.name,
         message: error.message,
@@ -383,15 +479,16 @@ class DocumentController {
         stack: error.stack,
       });
 
+      // Only mark failed if processing was started.
       if (processingStarted) {
-        await updateDocumentStatus(documentId, req.user.id, "failed").catch(
-          (updateError) => {
-            console.error(
-              "Failed to update document status:",
-              updateError.message,
-            );
-          },
-        );
+        try {
+          await updateDocumentStatus(documentId, req.user.id, "failed");
+        } catch (updateError) {
+          console.error(
+            "[PDF] Failed to update document status:",
+            updateError.message,
+          );
+        }
       }
 
       return res.status(500).json({
@@ -402,16 +499,24 @@ class DocumentController {
         }),
       });
     } finally {
-      // 12. Remove temporary PDF files
+      // ============================================
+      // CLEAN UP TEMPORARY FILES
+      // ============================================
+
       if (temporaryDirectory) {
-        await fs
-          .rm(temporaryDirectory, {
+        try {
+          await fs.rm(temporaryDirectory, {
             recursive: true,
             force: true,
-          })
-          .catch((error) => {
-            console.error("Temporary PDF cleanup failed:", error.message);
           });
+
+          console.log("[PDF] Temporary files cleaned up");
+        } catch (cleanupError) {
+          console.error(
+            "[PDF] Temporary cleanup failed:",
+            cleanupError.message,
+          );
+        }
       }
     }
   }
