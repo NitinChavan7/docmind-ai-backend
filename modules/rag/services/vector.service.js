@@ -314,21 +314,41 @@ const searchDocumentChunks = async (
 /**
  * Delete all vectors for one user's document.
  */
+
 const deleteDocumentChunks = async (documentId, userId) => {
   if (!documentId || !userId) {
     throw new Error("documentId and userId are required");
   }
 
-  await qdrant.delete(COLLECTION_NAME, {
-    wait: true,
+  const filter = createDocumentFilter(documentId, userId);
 
-    filter: createDocumentFilter(documentId, userId),
+  console.log("[Qdrant] Deleting vectors", {
+    collection: COLLECTION_NAME,
+    documentId: String(documentId),
+    userId: String(userId),
   });
 
-  return {
-    success: true,
-    documentId: String(documentId),
-  };
+  try {
+    const result = await qdrant.delete(COLLECTION_NAME, {
+      wait: true,
+      filter,
+    });
+
+    console.log("[Qdrant] Vector cleanup successful", result);
+
+    return {
+      success: true,
+      documentId: String(documentId),
+    };
+  } catch (error) {
+    console.error("[Qdrant] Delete request rejected", {
+      status: error.status,
+      message: error.message,
+      response: error.data?.status?.error || error.data,
+    });
+
+    throw error;
+  }
 };
 
 module.exports = {
