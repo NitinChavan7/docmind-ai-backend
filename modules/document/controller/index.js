@@ -4,8 +4,17 @@ const path = require("path");
 const { extractPdfText } = require("../services/pdf.service");
 const { splitTextIntoChunks } = require("../services/chunk.service");
 const { generateEmbeddings } = require("../../rag/services/embedding.service");
+const os = require("os");
 
-const { storeDocumentChunks, deleteDocumentChunks } = require("../../rag/services/vector.service");
+const {
+  uploadPdf,
+  downloadPdf,
+  deletePdf,
+} = require("../services/storage.service");
+const {
+  storeDocumentChunks,
+  deleteDocumentChunks,
+} = require("../../rag/services/vector.service");
 const {
   registerDocument,
   getAllDocuments,
@@ -30,6 +39,7 @@ const formatDocument = (document) => ({
 
 class DocumentController {
   // POST /api/documents/upload
+
   async uploadDocument(req, res) {
     if (!req.file) {
       return res.status(400).json({
@@ -39,22 +49,17 @@ class DocumentController {
       });
     }
 
+    let objectKey = null;
+    let savedDocument = false;
+
     try {
-      // Read the first five bytes of the uploaded file
-      const handle = await fs.open(req.file.path, "r");
-      const header = Buffer.alloc(5);
-      let bytesRead;
+      const fileBuffer = await fs.readFile(req.file.path);
 
-      try {
-        ({ bytesRead } = await handle.read(header, 0, 5, 0));
-      } finally {
-        await handle.close();
-      }
-
-      // Validate the PDF file signature
-      if (bytesRead !== 5 || header.toString("ascii") !== "%PDF-") {
-        await fs.unlink(req.file.path);
-
+      // Validate PDF signature.
+      if (
+        fileBuffer.length < 5 ||
+        fileBuffer.subarray(0, 5).toString("ascii") !== "%PDF-"
+      ) {
         return res.status(400).json({
           success: false,
           type: "ValidationError",
@@ -62,17 +67,28 @@ class DocumentController {
         });
       }
 
-      const requestBody = {
+      if (fileBuffer.length > 10 * 1024 * 1024) {
+        return res.status(413).json({
+          success: false,
+          message: "PDF must be under 10 MB",
+        });
+      }
+
+      // Use the server-generated filename, never the user filename.
+      objectKey = `${req.user.id}/${req.file.filename}`;
+
+      await uploadPdf(objectKey, fileBuffer);
+
+      const document = await registerDocument({
         userId: req.user.id,
         originalName: req.file.originalname,
         fileName: req.file.filename,
-        filePath: req.file.path,
-        mimeType: req.file.mimetype,
-        fileSize: req.file.size,
-      };
+        filePath: objectKey,
+        mimeType: "application/pdf",
+        fileSize: fileBuffer.length,
+      });
 
-      // Store metadata in MongoDB
-      const document = await registerDocument(requestBody);
+      savedDocument = true;
 
       return res.status(201).json({
         success: true,
@@ -80,15 +96,26 @@ class DocumentController {
         data: formatDocument(document),
       });
     } catch (error) {
-      // Remove uploaded file if database save fails
-      await fs.unlink(req.file.path).catch(() => {});
+      console.error("Upload error:", error.message);
 
-      console.error("Upload error:", error.name);
+      // Compensate for a failed MongoDB write.
+      if (objectKey && !savedDocument) {
+        try {
+          await deletePdf(objectKey);
+        } catch (cleanupError) {
+          console.error("Storage cleanup failed:", cleanupError.message);
+        }
+      }
 
       return res.status(500).json({
         success: false,
-        type: error.name,
         message: "Failed to upload PDF",
+      });
+    } finally {
+      await fs.unlink(req.file.path).catch((error) => {
+        if (error.code !== "ENOENT") {
+          console.error("Temporary file cleanup failed:", error.message);
+        }
       });
     }
   }
@@ -150,6 +177,7 @@ class DocumentController {
   }
 
   // GET /api/documents/:documentId/file
+
   async viewDocument(req, res) {
     try {
       const { documentId } = req.params;
@@ -170,19 +198,26 @@ class DocumentController {
         });
       }
 
-      // Only use the server-generated filename
-      const filePath = path.join(uploadDirectory, document.fileName);
+      const objectKey = document.filePath;
 
-      await fs.access(filePath);
+      // Newly uploaded files use an owner-scoped storage key.
+      if (!objectKey || !objectKey.startsWith(`${req.user.id}/`)) {
+        return res.status(404).json({
+          success: false,
+          message: "PDF must be uploaded again",
+        });
+      }
+
+      const pdfBuffer = await downloadPdf(objectKey);
 
       res.setHeader("Cache-Control", "private, no-store");
       res.setHeader("Content-Type", "application/pdf");
-
       res.setHeader("Content-Disposition", "inline");
+      res.setHeader("X-Content-Type-Options", "nosniff");
 
-      return res.sendFile(filePath);
+      return res.status(200).send(pdfBuffer);
     } catch (error) {
-      console.error("View document error:", error);
+      console.error("View document error:", error.message);
 
       return res.status(404).json({
         success: false,
@@ -192,6 +227,7 @@ class DocumentController {
   }
 
   // DELETE /api/documents/:documentId
+
   async deleteDocument(req, res) {
     try {
       const { documentId } = req.params;
@@ -212,18 +248,18 @@ class DocumentController {
         });
       }
 
-      const filePath = path.join(uploadDirectory, document.fileName);
+      // Remove existing search vectors.
+      if (document.status !== "uploaded") {
+        await deleteDocumentChunks(documentId);
+      }
 
-      if (document.status !== "uploaded") await deleteDocumentChunks(documentId);
+      // Delete private cloud object for migrated documents.
+      const objectKey = document.filePath;
 
-      // Delete PDF file
-      await fs.unlink(filePath).catch((error) => {
-        if (error.code !== "ENOENT") {
-          throw error;
-        }
-      });
+      if (objectKey && objectKey.startsWith(`${req.user.id}/`)) {
+        await deletePdf(objectKey);
+      }
 
-      // Delete MongoDB record
       await deleteDocumentById(documentId, req.user.id);
 
       return res.status(200).json({
@@ -231,7 +267,7 @@ class DocumentController {
         message: "Document deleted successfully",
       });
     } catch (error) {
-      console.error("Delete document error:", error);
+      console.error("Delete document error:", error.message);
 
       return res.status(500).json({
         success: false,
@@ -243,11 +279,10 @@ class DocumentController {
   async processDocument(req, res) {
     const { documentId } = req.params;
     let processingStarted = false;
+    let temporaryDirectory = null;
 
     try {
-
-
-      // Validate MongoDB ID
+      // 1. Validate document ID
       if (!mongoose.isValidObjectId(documentId)) {
         return res.status(400).json({
           success: false,
@@ -255,7 +290,7 @@ class DocumentController {
         });
       }
 
-      // Find document in MongoDB
+      // 2. Get the document owned by the logged-in user
       const document = await getDocumentById(documentId, req.user.id);
 
       if (!document) {
@@ -265,49 +300,60 @@ class DocumentController {
         });
       }
 
-      // The database lease prevents overlap and permits recovery after a crashed worker.
+      // 3. Get the private Supabase object key
+      const objectKey = document.filePath;
 
-      // Get uploaded PDF path
-      const filePath = path.join(uploadDirectory, document.fileName);
+      // Reject legacy documents stored only on local disk
+      if (
+        typeof objectKey !== "string" ||
+        !objectKey.startsWith(`${req.user.id}/`)
+      ) {
+        return res.status(404).json({
+          success: false,
+          message: "PDF must be uploaded again",
+        });
+      }
 
+      // 4. Download PDF from Supabase
+      const pdfBuffer = await downloadPdf(objectKey);
 
-      // Mark document as processing
+      // 5. Create a temporary directory for PDF extraction
+      temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "docmind-"));
+
+      const filePath = path.join(temporaryDirectory, "document.pdf");
+
+      await fs.writeFile(filePath, pdfBuffer);
+
+      // 6. Mark document as processing
       await updateDocumentStatus(documentId, req.user.id, "processing");
 
       processingStarted = true;
 
-      // Extract text from PDF
-
-
+      // 7. Extract PDF text
       const result = await extractPdfText(filePath);
 
-
-      // Split extracted text into chunks
+      // 8. Split extracted text into chunks
       const chunks = splitTextIntoChunks(result.pages, documentId);
-
 
       if (chunks.length === 0) {
         throw new Error("No searchable text found in PDF");
       }
 
-      // Step 1: Prepare extracted text chunks
+      // 9. Generate embeddings
       const texts = chunks.map((chunk) => chunk.content);
-
-      // Step 2: Generate embeddings using Ollama
-
 
       const embeddings = await generateEmbeddings(texts);
 
-
-      // Step 3: Save vectors in ChromaDB
-
-
+      // 10. Store embeddings in the vector database
       const vectorResult = await storeDocumentChunks(chunks, embeddings);
 
-
-      // Step 4: Mark document as ready
-      await updateDocumentStatus(documentId, req.user.id, "ready", result.pageCount);
-
+      // 11. Mark document as ready
+      await updateDocumentStatus(
+        documentId,
+        req.user.id,
+        "ready",
+        result.pageCount,
+      );
 
       return res.status(200).json({
         success: true,
@@ -321,12 +367,19 @@ class DocumentController {
         },
       });
     } catch (error) {
-      console.error("PDF processing failed:", error.name);
+      console.error("PDF processing failed:", {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+      });
 
       if (processingStarted) {
         await updateDocumentStatus(documentId, req.user.id, "failed").catch(
           (updateError) => {
-            console.error("Failed to update document status:", updateError);
+            console.error(
+              "Failed to update document status:",
+              updateError.message,
+            );
           },
         );
       }
@@ -338,6 +391,18 @@ class DocumentController {
           error: error.message,
         }),
       });
+    } finally {
+      // 12. Remove temporary PDF files
+      if (temporaryDirectory) {
+        await fs
+          .rm(temporaryDirectory, {
+            recursive: true,
+            force: true,
+          })
+          .catch((error) => {
+            console.error("Temporary PDF cleanup failed:", error.message);
+          });
+      }
     }
   }
 }
