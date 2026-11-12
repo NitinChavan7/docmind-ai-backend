@@ -6,6 +6,8 @@ const mongoose = require('mongoose');
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const { MongoMemoryServer } = require('mongodb-memory-server');
+const cloud = require('./helpers/clouds');
+const { makePdf } = require('./helpers/pdf');
 process.env.JWT_ACCESS_SECRET = crypto.randomBytes(64).toString('hex');
 process.env.JWT_REFRESH_SECRET = crypto.randomBytes(64).toString('hex');
 process.env.NODE_ENV = 'test';
@@ -104,10 +106,9 @@ test('multi-user authentication, private documents and persistent chats', async 
   await t.test('upload validates PDF signatures and ignores forged user IDs', async () => {
     assert.equal((await a.mutate('post', '/api/documents/upload', undefined, 'not a PDF')).status, 400);
     for (const name of ['rahul', 'amit']) {
-      const response = await a.mutate('post', '/api/documents/upload', { userId: new mongoose.Types.ObjectId().toString() }, '%PDF-1.4\nTest fixture');
+      const response = await a.mutate('post', '/api/documents/upload', { userId: new mongoose.Types.ObjectId().toString() }, makePdf(1, name));
       assert.equal(response.status, 201);
       const document = await models.Document.findById(response.body.data.documentId);
-      files.add(document.filePath);
       assert.equal(String(document.userId), userA);
       if (name === 'rahul') rahul = String(document._id); else amit = String(document._id);
     }
@@ -212,7 +213,7 @@ test('multi-user authentication, private documents and persistent chats', async 
     assert.equal((await a.mutate('delete', `/api/documents/${rahul}`)).status, 200);
     assert.equal(await models.Chat.countDocuments({ documentId: rahul }), 0);
     assert.equal(await models.Message.countDocuments({ documentId: rahul }), 0);
-    await assert.rejects(fs.access(document.filePath));
+    assert.equal(cloud.files.has(document.filePath), false);
     assert.equal((await a.call('get', `/api/documents/${rahul}/view`)).status, 404);
     assert.equal((await a.call('get', `/api/chats/${chatId}/messages`)).status, 404);
   });

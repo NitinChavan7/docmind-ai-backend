@@ -1,10 +1,10 @@
 # Database module
 
-This module defines MongoDB document shapes through Mongoose. It stores application records, not PDF bytes or Chroma vectors.
+This module defines MongoDB document shapes through Mongoose. It stores application records, not PDF bytes or Qdrant vectors.
 
 ## Files and library
 
-[index.js](index.js) exports `User`, `AuthSession`, `Document`, `Chat` and `Message`. Each exported value is a Mongoose model with query/write methods such as `findOne`, `create`, `updateOne` and `bulkWrite`. The library is `mongoose`; MongoDB is the external database server.
+[index.js](index.js) exports `User`, `AuthSession`, `Document`, `Chat`, `Message`, `UsageAccount` and `QuestionUsage`. Each exported value is a Mongoose model with query/write methods such as `findOne`, `create`, `updateOne` and `bulkWrite`. The library is `mongoose`; MongoDB is the external database server.
 
 | Model | Collection | Purpose | Guide |
 | --- | --- | --- | --- |
@@ -13,6 +13,8 @@ This module defines MongoDB document shapes through Mongoose. It stores applicat
 | Document | `documents` | PDF metadata, owner and processing state | [Document](models/Document.README.md) |
 | Chat | `chats` | A conversation for one user's PDF | [Chat](models/Chat.README.md) |
 | Message | `messages` | User/assistant message with sources | [Message](models/Message.README.md) |
+| UsageAccount | `usage_accounts` | Distributed quota lock and rolling-minute admissions | [UsageAccount](models/UsageAccount.README.md) |
+| QuestionUsage | `question_usage` | Durable question reservations, daily usage and generation leases | [QuestionUsage](models/QuestionUsage.README.md) |
 
 ## Connection functions
 

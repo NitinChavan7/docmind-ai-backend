@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 require("./config/auth").validateAuthConfig();
+require("./config/usage-limits");
 
 const app = require("./app");
 const connectDB = require("./config/db");

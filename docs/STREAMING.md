@@ -1,6 +1,6 @@
 # Streaming document answers
 
-The existing `POST /api/chats/:chatId/messages` JSON endpoint still works. The new endpoint is **`POST /api/chats/:chatId/stream`** and returns SSE over a normal authenticated POST fetch. This change is confined to the backend; a React consumer must opt into this endpoint. It does not use EventSource or WebSockets.
+The existing `POST /api/chats/:chatId/messages` JSON endpoint still works. The streaming endpoint is **`POST /api/chats/:chatId/stream`** and returns SSE over a normal authenticated POST fetch. The matching React frontend consumes this endpoint with fetch. It does not use EventSource or WebSockets.
 
 ```json
 { "question": "Where is the candidate located?" }
@@ -8,7 +8,9 @@ The existing `POST /api/chats/:chatId/messages` JSON endpoint still works. The n
 
 Use `Content-Type: application/json`, `Accept: text/event-stream`, the current `X-CSRF-Token` and `credentials: 'include'`. The question must be a nonblank string of at most 4,000 JavaScript characters. This repository has only document RAG: there is no existing mode router or web search, so omit `mode`. Supplied modes are rejected with 400 rather than silently implementing another system. `meta.mode` is the descriptive label `document`.
 
-Authentication, session revocation, origin/CORS and CSRF checks are the same as the protected JSON route. Chat and document ownership are checked before any Ollama or retrieval call. `userId`, `history`, `sources`, model names and similar body fields cannot override server-owned values. Responses never expose private paths, tokens, upstream error bodies or stack traces.
+Authentication, session revocation, origin/CORS and CSRF checks are the same as the protected JSON route. Chat and document ownership are checked before any Groq or retrieval call. `userId`, `history`, `sources`, model names and similar body fields cannot override server-owned values. Responses never expose private paths, tokens, upstream error bodies or stack traces.
+
+Free-plan quotas are checked before `openSse()`. A rejection returns a non-200 JSON error with `code`, `message`, `details` and `Retry-After` where appropriate. JSON, SSE and legacy RAG share the account allowance. Expired chats/PDFs return 410. Started cancellations remain charged but release concurrency. See [the quota contract](FREE_PLAN.md) for defaults, charge semantics and retry rules.
 
 ## Wire format
 
@@ -57,11 +59,11 @@ data: {"status":"cancelled"}
 
 ```
 
-Errors end the response without `done`. A deadline error says the answer took too long. A truncated NDJSON response, malformed record, invalid UTF-8, upstream error record, empty answer, or length violation cannot produce a successful `done`. The Ollama stream must reach `done:true`.
+Errors end the response without `done`. A deadline error says the answer took too long. A truncated Groq SSE response, malformed JSON event, upstream error, empty answer or length violation cannot produce a successful `done`. The Groq stream must reach `[DONE]` with a `stop` finish reason.
 
-Abort the frontend fetch with its AbortController to stop generation. The server listens to actual request abortion and **response** close; it does not mistake a normal parsed request-body close for a disconnect. Cancellation propagates through rewriting, embeddings, Chroma read requests and Ollama streaming; readers, timers, capacity slots and the document lease are cleaned up. A disconnected browser normally cannot receive a `cancelled` event because it has closed the transport. Mark the local UI cancelled immediately; the server emits that event only when the transport remains writable. An open stream is authenticated at admission, like the existing JSON request; logout does not retroactively stop work on another already-open connection, so the frontend should abort outstanding fetches on logout.
+Abort the frontend fetch with its AbortController to stop generation. The server listens to actual request abortion and **response** close; it does not mistake a normal parsed request-body close for a disconnect. Cancellation reaches Groq rewriting and streaming. Qdrant calls check the signal before/after queries but do not pass it to the client request; readers, timers, capacity slots and the document lease are cleaned up. A disconnected browser normally cannot receive a `cancelled` event because it has closed the transport. Mark the local UI cancelled immediately; the server emits that event only when the transport remains writable. An open stream is authenticated at admission, like the existing JSON request; logout does not retroactively stop work on another already-open connection, so the frontend should abort outstanding fetches on logout.
 
-**Persistence policy:** do not write either side of a turn until a complete, nonempty answer is generated. A failure/cancellation before this point leaves no user-only message and no partial assistant answer. Once generation completes, cancellation is checked and the existing pending-turn journal becomes the commit point. Both messages are then saved with user/document/chat ownership and the chat title/time is updated. If the connection closes during this database commit, the full generated answer may still be saved. If a database write is interrupted after journaling, the existing history/read retry recovers the complete pair; `done` is emitted only after persistence and lease cleanup succeed. After a lost connection or saving error, reload `GET /api/chats/:chatId/messages` before retrying. This streaming endpoint does not promise request idempotency; the existing JSON endpoint retains its `requestId` behavior.
+**Persistence policy:** do not write either side of a turn until a complete, nonempty answer is generated. A failure/cancellation before this point leaves no user-only message and no partial assistant answer. Once generation completes, cancellation is checked and the existing pending-turn journal becomes the commit point. Both messages are then saved with user/document/chat ownership and the chat title/time is updated. If the connection closes during this database commit, the full generated answer may still be saved. If a database write is interrupted after journaling, the existing history/read retry recovers the complete pair; `done` is emitted only after persistence and lease cleanup succeed. After a lost connection or saving error, reload `GET /api/chats/:chatId/messages` before retrying. Streaming now accepts an optional stable `requestId` and replays a completed matching turn across JSON/SSE without another generation or charge. Without an ID, requests remain distinct; reload history before retrying an interrupted frontend stream.
 
 ## Limits
 
@@ -72,17 +74,15 @@ Abort the frontend fetch with its AbortController to stop generation. The server
 | `MAX_USER_GENERATIONS`       | 1       | In-process slots per user                                                           |
 | `GENERATION_RATE_LIMIT`      | 20      | Shared streaming/JSON chat requests per minute per IP; maximum configured value 120 |
 
-Invalid configuration values use the defaults. Ollama rewrite/embed/chat calls also retain a 120-second upstream deadline. The document lease continues to serialize conflicting operations across backend instances. Generated answers are limited to 20,000 characters; upstream NDJSON is limited to 4 MiB and 131,072 characters per record. Incoming JSON retains the app's 1 MiB cap. Rate limits and capacity counters are process-local; use shared infrastructure for a fleet-wide budget. A completed generation's recoverable database commit/cleanup can outlast a generation deadline during a database outage; the journal is deliberately not abandoned halfway through committing a full answer.
+Invalid configuration values use the defaults. Groq rewriting and answer calls also have a 120-second upstream deadline. The document lease continues to serialize conflicting operations across backend instances. Generated answers are limited to 20,000 characters; the Groq SSE parser buffer is capped at 1 MiB. The generic stream utility separately limits streams to 4 MiB and lines to 131,072 characters. Incoming JSON retains the app's 1 MiB cap. Rate limits and capacity counters are process-local; use shared infrastructure for a fleet-wide budget. A completed generation's recoverable database commit/cleanup can outlast a generation deadline during a database outage; the journal is deliberately not abandoned halfway through committing a full answer.
 
-The implementation shares the original prompt builder, question rewriting, MongoDB history and retrieval/context builder with non-streaming answers. It uses the existing `OLLAMA_BASE_URL` and `OLLAMA_CHAT_MODEL` (default `llama3.2:3b`), and existing `nomic-embed-text` embeddings without changing dimensions. See [Ollama chat API](https://docs.ollama.com/api/chat) and [NDJSON streaming format](https://docs.ollama.com/api/streaming).
+The implementation shares the original prompt builder, question rewriting, MongoDB history and retrieval/context builder with non-streaming answers. It uses `GROQ_API_KEY` and `GROQ_MODEL` (default `openai/gpt-oss-20b`). Retrieval uses Qdrant Cloud Inference with the configured embedding model. See [AI models](ai-models/README.md) and [prompt engineering](PROMPT_ENGINEERING.md).
 
 ## Windows verification
 
-Run MongoDB, Chroma and Ollama, pull the existing models if needed, then start the backend:
+Configure MongoDB, Supabase, Qdrant and Groq as described in the [main README](../README.md), then start the backend:
 
 ```powershell
-ollama pull llama3.2:3b
-ollama pull nomic-embed-text
 npm run dev
 ```
 
@@ -142,7 +142,7 @@ Run all backend checks:
 npm test
 ```
 
-The tests use a real local HTTP mock Ollama server and temporary MongoDB, not a live production account/model. They cover decoding, backpressure, event order, citations, saved IDs/history, ownership, CSRF/CORS, errors, disconnects, timeouts, limits and persistence failures. The first run may download a MongoDB test binary. This repository has no configured lint or build script.
+The streaming fixtures still simulate the previous Ollama integration and require migration for Groq, direct Qdrant retrieval and Supabase storage. See [test limitations](../tests/README.md). Shared parser tests cover decoding, cancellation and backpressure independently; the full suite is not current cloud integration evidence. The first run may download a MongoDB test binary. This repository has no configured lint or build script.
 
 ## Files changed for this feature
 

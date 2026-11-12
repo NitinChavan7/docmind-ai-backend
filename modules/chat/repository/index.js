@@ -1,9 +1,16 @@
 const { Chat, Message, Document } = require('../../database');
+const { availableFilter, assertAvailable } = require('../../usage/resources');
 const scope = chat => ({ userId: chat.userId, documentId: chat.documentId, chatId: chat._id });
-const getOwnedDocument = (userId, documentId) => Document.findOne({ _id: documentId, userId }).lean();
-const getOwnedChat = (userId, chatId) => Chat.findOne({ _id: chatId, userId }).select('+pendingTurn').lean();
-const getChats = (userId, documentId) => Chat.find({ userId, documentId }).sort({ lastMessageAt: -1, _id: -1 }).limit(100).lean();
-const createChat = (userId, documentId) => Chat.create({ userId, documentId });
+const getOwnedDocument = async (userId, documentId) => {
+  const document = await Document.findOne({ _id: documentId, userId }).lean();
+  return document ? assertAvailable(document) : null;
+};
+const getOwnedChat = async (userId, chatId) => {
+  const chat = await Chat.findOne({ _id: chatId, userId }).select('+pendingTurn').lean();
+  return chat ? assertAvailable(chat, 'CHAT') : null;
+};
+const getChats = (userId, documentId) => Chat.find({ userId, documentId, ...availableFilter() }).sort({ lastMessageAt: -1, _id: -1 }).limit(100).lean();
+const createChat = (userId, documentId) => require('../../usage/usage.service').createChat(userId, documentId);
 const getMessages = (chat, before, limit) => Message.find({ ...scope(chat), committed: true, ...(before ? { _id: { $lt: before } } : {}) }).sort({ _id: -1 }).limit(limit).lean();
 const getTurn = (chat, requestId) => Message.find({ ...scope(chat), requestId, committed: true }).sort({ _id: 1 }).lean();
 const saveTurn = async (chat, requestId, question, result, messageIds) => {

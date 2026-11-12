@@ -19,7 +19,7 @@ router.get("/:documentId/view", documentController.viewDocument);
 
 router.get("/:documentId", documentController.getDocument);
 
-router.delete("/:documentId", documentOperation(documentController.deleteDocument));
+router.delete("/:documentId", documentOperation(documentController.deleteDocument, { allowUnavailable: true }));
 
 router.post("/:documentId/process", documentOperation(documentController.processDocument));
 module.exports = router;

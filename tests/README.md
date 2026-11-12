@@ -1,38 +1,36 @@
 # Backend tests
 
-Run from the backend root:
+Run the full automated suite:
 
 ```powershell
 npm test
 ```
 
-[package.json](../package.json) explicitly runs the three automated test files below using Node's built-in test runner. A temporary MongoDB binary may be downloaded on first use. The tests do not require your real user account or production database.
+The suite uses Node's test runner, Supertest and temporary MongoDB instances. First use may download a MongoDB binary. Supabase and Qdrant are mocked before application imports; streaming uses a local HTTP server that emits Groq-compatible SSE. No production credentials or objects are required.
 
-## Libraries and APIs
-
-| Dependency | Why it is used |
+| File | Coverage |
 | --- | --- |
-| Node `node:test`, `node:assert/strict` | Test lifecycle, assertions and subtests |
-| `mongodb-memory-server` | Launches isolated temporary MongoDB for real Mongoose queries/indexes |
-| `supertest` | Sends requests to the imported Express app in multi-user tests |
-| `mongoose` | Exercises the actual models and repositories |
-| `jsonwebtoken` | Constructs expired access-token fixtures |
-| Node `http`, `fetch`, Web streams, `crypto`, `fs/promises` | Real HTTP mock upstreams, streaming, temporary identities and upload cleanup |
+| [multi-user.test.js](multi-user.test.js) | Accounts, password/Google login, cookies, CSRF, ownership, histories, retries, journal recovery and logout |
+| [streaming.test.js](streaming.test.js) | Real Groq-adapter SSE parsing against a local fake provider, event ordering, persistence, cancellation, deadlines and process capacity |
+| [stream-parser.test.js](stream-parser.test.js) | Shared UTF-8, NDJSON/SSE parsing, cancellation and backpressure |
+| [llm-latency.test.js](llm-latency.test.js) | Standalone-call reduction, contextual rewriting, deadlines and reasoning settings |
+| [chat-latency.test.js](chat-latency.test.js) | Authentication query concurrency, ownership, idempotency, turn persistence and stream errors |
+| [usage-limits.test.js](usage-limits.test.js) | Quota boundaries/races, UTC reset, distributed leases, shared endpoint quotas, retention, cleanup retries and backfill |
+| [helpers/clouds.js](helpers/clouds.js) | In-memory private object storage/vector mocks with injectable failures |
+| [helpers/pdf.js](helpers/pdf.js) | Real PDF fixtures with configurable pages and exact byte sizes |
 
-## Files and coverage
+Focused commands:
 
-| File | What it verifies | External work simulated |
-| --- | --- | --- |
-| [multi-user.test.js](multi-user.test.js) | Accounts, cookies, CSRF/session binding, owned document routes, candidate histories, retries, recovery, overlapping operations, replay/expiry/logout and deletion | Google token verifier, PDF extraction, embeddings, vectors, answer generation |
-| [stream-parser.test.js](stream-parser.test.js) | Split UTF-8/NDJSON/SSE, invalid/oversized records, blocked-reader cancellation, lock cleanup and writer backpressure | In-memory byte streams and a response EventEmitter |
-| [streaming.test.js](streaming.test.js) | Auth/ownership/origin/CSRF, real HTTP event order/deltas, citations and IDs, stored memory, fallback, upstream failures, aborts, timeout, caps/rate limit and saving failures | Local HTTP Ollama server and Chroma retrieval; MongoDB remains real and temporary |
+```powershell
+npm run test:usage
+npm run test:latency
+node --test tests/stream-parser.test.js
+```
 
-The multi-user `Client` helper stores response cookies and obtains CSRF before mutations. Streaming tests use a separate client helper plus real fetch against a local Express listener. The mock Ollama server handles rewriting, 768-number embedding fixtures and streamed responses, including deliberately broken or never-ending responses.
+Expected result: all selected tests pass with zero failures. Test rate-limit overrides in the legacy protocol suite allow it to exercise many failure cases; the usage suite verifies the actual free-plan defaults. See [the free-plan guide](../docs/FREE_PLAN.md) for the rollout checklist, schema/index changes and complete quota test scenarios.
 
-These tests exercise backend behavior and deterministic mock outputs. They do not prove live model quality, actual Google configuration, production proxy flushing or a deployed frontend's rendering.
+## Verification limits
 
-## Browser fixture
+Mocks verify application behavior, not real provider credentials, cloud availability, production indexes or deployment. Live [manual diagnostics](../scripts/README.md) are separate and make external requests. No retention scheduler is configured by these tests.
 
-[browser-server.js](browser-server.js) is an optional development fixture, not part of `npm test`. Run `node tests/browser-server.js`; it listens on `127.0.0.1:5101`, allows frontend origin `http://localhost:5174`, generates temporary JWT secrets and uses temporary MongoDB. It keeps real PDF parsing/files while stubbing embeddings, vector writes/deletes and the non-streaming RAG answer. The synthetic two-number embeddings are not the production model's vector space. The streaming RAG path is not stubbed by this fixture.
-
-Its `stop()` handler attempts file/database cleanup on SIGINT/SIGTERM. Uploaded fixture PDFs use the normal local upload directory, so stop the fixture cleanly when finished. It is not a production launch command.
+[browser-server.js](browser-server.js) is an older standalone browser fixture, outside npm test. It still needs migration of its Supabase handling and cleanup before use. Do not use it as a production server or as proof of cloud integration coverage.

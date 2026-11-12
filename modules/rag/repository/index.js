@@ -1,14 +1,16 @@
 const { Document } = require("../../database");
+const { assertAvailable } = require('../../usage/resources');
 
 const { searchDocumentChunks } = require("../services/vector.service");
 
 // Check document exists and is indexed
 const getReadyDocument = async (documentId, userId) => {
-  return await Document.findOne({
+  const document = await Document.findOne({
     _id: documentId,
     userId,
     status: "ready",
   }).lean();
+  return document ? assertAvailable(document) : null;
 };
 
 // Retrieve relevant PDF chunks

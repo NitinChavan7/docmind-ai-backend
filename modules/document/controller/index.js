@@ -6,24 +6,21 @@ const { splitTextIntoChunks } = require("../services/chunk.service");
 // const { generateEmbeddings } = require("../../rag/services/embedding.service");
 const os = require("os");
 
-const {
-  uploadPdf,
-  downloadPdf,
-  deletePdf,
-} = require("../services/storage.service");
+const { downloadPdf } = require("../services/storage.service");
 const {
   storeDocumentChunks,
-  deleteDocumentChunks,
 } = require("../../rag/services/vector.service");
 const {
-  registerDocument,
   getAllDocuments,
   getDocumentById,
   updateDocumentStatus,
-  deleteDocumentById,
 } = require("../repository");
 
-const uploadDirectory = path.resolve(__dirname, "../../../uploads");
+const { uploadDocument: uploadPrivateDocument } = require('../services/upload.service');
+const { deleteDocumentRecords } = require('../../usage/cleanup.service');
+const { sendError } = require('../../usage/errors');
+const { inspectPdfBuffer, validatePageCount } = require('../services/pdf.service');
+const { assertAvailable } = require('../../usage/resources');
 
 // Only expose safe document metadata
 const formatDocument = (document) => ({
@@ -33,6 +30,7 @@ const formatDocument = (document) => ({
   mimeType: document.mimeType,
   status: document.status,
   pageCount: document.pageCount,
+  expiresAt: document.expiresAt || null,
   createdAt: document.createdAt,
   updatedAt: document.updatedAt,
 });
@@ -40,82 +38,16 @@ const formatDocument = (document) => ({
 class DocumentController {
   // POST /api/documents/upload
 
-  async uploadDocument(req, res) {
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        type: "ValidationError",
-        message: "Please upload a PDF file",
-      });
-    }
-
-    let objectKey = null;
-    let savedDocument = false;
-
+  async uploadDocument(req, res, next) {
+    if (!req.file) return sendError(res, require('../../usage/errors').usageError(400, 'INVALID_PDF_FILE', 'Please upload a PDF file.'));
     try {
-      const fileBuffer = await fs.readFile(req.file.path);
-
-      // Validate PDF signature.
-      if (
-        fileBuffer.length < 5 ||
-        fileBuffer.subarray(0, 5).toString("ascii") !== "%PDF-"
-      ) {
-        return res.status(400).json({
-          success: false,
-          type: "ValidationError",
-          message: "Invalid PDF file",
-        });
-      }
-
-      if (fileBuffer.length > 10 * 1024 * 1024) {
-        return res.status(413).json({
-          success: false,
-          message: "PDF must be under 10 MB",
-        });
-      }
-
-      // Use the server-generated filename, never the user filename.
-      objectKey = `${req.user.id}/${req.file.filename}`;
-
-      await uploadPdf(objectKey, fileBuffer);
-
-      const document = await registerDocument({
-        userId: req.user.id,
-        originalName: req.file.originalname,
-        fileName: req.file.filename,
-        filePath: objectKey,
-        mimeType: "application/pdf",
-        fileSize: fileBuffer.length,
-      });
-
-      savedDocument = true;
-
-      return res.status(201).json({
-        success: true,
-        message: "PDF uploaded successfully",
-        data: formatDocument(document),
-      });
-    } catch (error) {
-      console.error("Upload error:", error.message);
-
-      // Compensate for a failed MongoDB write.
-      if (objectKey && !savedDocument) {
-        try {
-          await deletePdf(objectKey);
-        } catch (cleanupError) {
-          console.error("Storage cleanup failed:", cleanupError.message);
-        }
-      }
-
-      return res.status(500).json({
-        success: false,
-        message: "Failed to upload PDF",
-      });
-    } finally {
-      await fs.unlink(req.file.path).catch((error) => {
-        if (error.code !== "ENOENT") {
-          console.error("Temporary file cleanup failed:", error.message);
-        }
+      const buffer = await fs.readFile(req.file.path);
+      const document = await uploadPrivateDocument(req.user.id, req.file, buffer);
+      return res.status(201).json({ success: true, message: 'PDF uploaded successfully', data: formatDocument(document) });
+    } catch (error) { return next(error); }
+    finally {
+      await fs.unlink(req.file.path).catch(error => {
+        if (error.code !== 'ENOENT') console.error('[Upload] Temporary file cleanup deferred');
       });
     }
   }
@@ -131,6 +63,7 @@ class DocumentController {
         data: documents.map(formatDocument),
       });
     } catch (error) {
+      if (error.public) return sendError(res, error);
       console.error("Fetch documents error:", error);
 
       return res.status(500).json({
@@ -167,6 +100,7 @@ class DocumentController {
         data: formatDocument(document),
       });
     } catch (error) {
+      if (error.public) return sendError(res, error);
       console.error("Get document error:", error);
 
       return res.status(500).json({
@@ -209,6 +143,7 @@ class DocumentController {
       }
 
       const pdfBuffer = await downloadPdf(objectKey);
+      assertAvailable(document);
 
       res.setHeader("Cache-Control", "private, no-store");
       res.setHeader("Content-Type", "application/pdf");
@@ -217,6 +152,7 @@ class DocumentController {
 
       return res.status(200).send(pdfBuffer);
     } catch (error) {
+      if (error.public) return sendError(res, error);
       console.error("View document error:", error.message);
 
       return res.status(404).json({
@@ -228,64 +164,11 @@ class DocumentController {
 
   // DELETE /api/documents/:documentId
 
-  async deleteDocument(req, res) {
+  async deleteDocument(req, res, next) {
     try {
-      const { documentId } = req.params;
-      const userId = req.user.id;
-
-      // 1. Validate MongoDB document ID
-      if (!mongoose.isValidObjectId(documentId)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid document ID",
-        });
-      }
-
-      // 2. Verify that the document belongs to this user
-      const document = await getDocumentById(documentId, userId);
-
-      if (!document) {
-        return res.status(404).json({
-          success: false,
-          message: "Document not found",
-        });
-      }
-
-      // 3. Delete document vectors from Qdrant Cloud.
-      // Also clean up possible partial indexing attempts.
-      console.log("[Document] Deleting Qdrant vectors");
-
-      await deleteDocumentChunks(documentId, userId);
-
-      // 4. Delete the PDF from private Supabase Storage
-      const objectKey = document.filePath;
-
-      if (typeof objectKey === "string" && objectKey.startsWith(`${userId}/`)) {
-        console.log("[Document] Deleting PDF from Supabase");
-        await deletePdf(objectKey);
-      }
-
-      // 5. Delete document metadata from MongoDB Atlas
-      await deleteDocumentById(documentId, userId);
-
-      console.log("[Document] Document deleted successfully");
-
-      return res.status(200).json({
-        success: true,
-        message: "Document deleted successfully",
-      });
-    } catch (error) {
-      console.error("Delete document error:", {
-        name: error.name,
-        message: error.message,
-        stack: error.stack,
-      });
-
-      return res.status(500).json({
-        success: false,
-        message: "Failed to delete document",
-      });
-    }
+      await deleteDocumentRecords(req.documentOperation.document, req.documentOperation.ensureLease);
+      return res.json({ success: true, message: 'Document deleted successfully' });
+    } catch (error) { return next(error); }
   }
 
   async processDocument(req, res) {
@@ -354,9 +237,11 @@ class DocumentController {
       );
 
       // ============================================
-      // STEP 5: Create temporary PDF file
+      // STEP 5: Inspect before extraction or cloud inference
       // ============================================
 
+      await inspectPdfBuffer(pdfBuffer);
+      req.documentOperation?.ensureLease();
       temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "docmind-"));
 
       const filePath = path.join(temporaryDirectory, "document.pdf");
@@ -389,6 +274,7 @@ class DocumentController {
         throw new Error("PDF text extraction returned no pages");
       }
 
+      validatePageCount(result.pageCount);
       console.log("[PDF] Text extraction successful. Pages:", result.pageCount);
 
       // ============================================
@@ -426,6 +312,7 @@ class DocumentController {
 
       console.log("[PDF] Sending chunks to Qdrant Cloud Inference");
 
+      req.documentOperation?.ensureLease();
       const vectorResult = await storeDocumentChunks(chunks, req.user.id);
 
       if (!vectorResult || vectorResult.storedChunks !== chunks.length) {
@@ -442,6 +329,7 @@ class DocumentController {
       // STEP 11: Update MongoDB document status
       // ============================================
 
+      req.documentOperation?.ensureLease();
       await updateDocumentStatus(
         documentId,
         req.user.id,
@@ -491,6 +379,7 @@ class DocumentController {
         }
       }
 
+      if (error.public) return sendError(res, error);
       return res.status(500).json({
         success: false,
         message: "PDF processing failed",

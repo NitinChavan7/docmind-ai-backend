@@ -11,5 +11,9 @@ const schema = new mongoose.Schema({
   committed: { type: Boolean, default: false },
 }, { timestamps: true });
 schema.index({ chatId: 1, createdAt: 1, _id: 1 });
+// History and model memory filter committed messages and page by _id.
+schema.index({ chatId: 1, committed: 1, _id: -1 });
+// Daily quota compatibility checks must not scan every user's history.
+schema.index({ userId: 1, role: 1, committed: 1, createdAt: 1 });
 schema.index({ chatId: 1, requestId: 1, role: 1 }, { unique: true });
 module.exports = mongoose.model('Message', schema, 'messages');

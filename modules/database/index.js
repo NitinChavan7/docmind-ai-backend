@@ -6,4 +6,6 @@ module.exports = {
   Chat: require('./models/Chat'),
   Message: require('./models/Message'),
   AuthSession: require('./models/AuthSession'),
+  UsageAccount: require('./models/UsageAccount'),
+  QuestionUsage: require('./models/QuestionUsage'),
 };

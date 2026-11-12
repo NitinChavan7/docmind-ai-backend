@@ -2,6 +2,8 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const cookieParser = require("cookie-parser");
+const { usageError, sendError } = require('./modules/usage/errors');
+const usageLimits = require('./config/usage-limits');
 
 const {
   allowedOrigins,
@@ -54,6 +56,8 @@ app.use("/api", modules);
 // Central error handler
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
+  if (error.code === 'LIMIT_FILE_SIZE') error = usageError(413, 'PDF_SIZE_LIMIT_EXCEEDED', 'This PDF exceeds the file-size allowance.', { limit: usageLimits.maxPdfSizeBytes });
+  if (error.public) return sendError(res, error);
 
   const status =
     error.code === "LIMIT_FILE_SIZE"

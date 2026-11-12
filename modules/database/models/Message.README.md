@@ -1,8 +1,8 @@
 # Message model
 
-Source: [Message.js](Message.js). Library: `mongoose`. Model name: `Message`. Collection: `messages`.
+[Message.js](Message.js) defines the Mongoose `Message` model in the `messages` collection.
 
-This record stores one side of a conversation turn. A successful answer normally creates two records: the user's question and the assistant's answer with PDF sources.
+Stores one user question or assistant answer. The chat repository journals a completed turn, writes both messages and marks them committed before returning them in history. Assistant messages also retain the retrieved PDF passages.
 
 | Field | Type / validation | Purpose |
 | --- | --- | --- |
@@ -15,9 +15,9 @@ This record stores one side of a conversation turn. A successful answer normally
 | `requestId` | Required string | Groups a turn and supports JSON-endpoint retries |
 | `committed` | Boolean, default false | Whether application history readers can show the record |
 
-The model adds `_id` and timestamps. Index `{chatId:1,createdAt:1,_id:1}` supports ordered history. Unique `{chatId:1,requestId:1,role:1}` prevents a duplicate same-role message for the same request/turn.
+The model adds `_id` and timestamps. Indexes include `{chatId:1,createdAt:1,_id:1}` and `{chatId:1,committed:1,_id:-1}`. The latter matches committed-history queries and `_id` pagination, including the latest eight messages used as model memory. Unique `{chatId:1,requestId:1,role:1}` prevents a duplicate same-role message for the same request/turn.
 
-There are no custom model functions. The repository uses `bulkWrite` upserts, `updateMany`, queries and deletion. `getMessages` scopes by user/document/chat and returns only committed records; callers reverse its newest-first pages for display. Sources are flexible Mixed objects, so the schema does not deeply validate their shape.
+The repository uses `bulkWrite` to upsert each message and `updateMany` to mark the turn committed. `getMessages` filters by user, document and chat, returning only committed records. Callers reverse its newest-first pages for display. The `sources` field accepts Mixed objects without validating their individual properties.
 
 Example:
 
@@ -28,3 +28,5 @@ const messages = await Message.find({ userId, documentId, chatId, committed: tru
 ```
 
 Only completed generation enters the journal/save path. Cancelled/failed generation does not create a partial assistant or orphan user message. The stream's preallocated assistant ID is used as this record's `_id` after success. There is no `status` field: SSE `status:'completed'` describes the protocol outcome; persisted visibility uses `committed`.
+
+The index {userId:1,role:1,committed:1,createdAt:1} supports daily legacy-question accounting. Cleanup snapshots today's committed legacy requests into QuestionUsage before removing messages, so deletion cannot refund daily usage. See [free-plan accounting](../../../docs/FREE_PLAN.md).

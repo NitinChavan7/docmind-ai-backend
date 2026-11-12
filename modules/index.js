@@ -10,5 +10,6 @@ router.use(requireAuth, require('../middleware/csrf.middleware').verifyCsrf);
 router.use("/documents", documentModule);
 router.use("/rag", ragModule);
 router.use('/chats', require('./chat'));
+router.use('/usage', require('./usage'));
 
 module.exports = router;

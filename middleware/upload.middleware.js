@@ -2,6 +2,8 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
+const limits = require('../config/usage-limits');
+const { usageError } = require('../modules/usage/errors');
 
 const uploadPath = path.join(__dirname, "../uploads");
 
@@ -30,7 +32,7 @@ const fileFilter = (req, file, cb) => {
   if (file.mimetype === "application/pdf") {
     cb(null, true);
   } else {
-    cb(new Error("Only PDF files are allowed"));
+    cb(usageError(400, 'INVALID_PDF_FILE', 'Only PDF files are allowed.'));
   }
 };
 
@@ -39,7 +41,10 @@ const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
-    fileSize: 10 * 1024 * 1024,
+    // Multer may flag a stream exactly at its cap; allow one extra byte here
+    // and enforce the inclusive configured boundary against the actual buffer.
+    fileSize: limits.maxPdfSizeBytes + 1,
+    files: 1,
   },
 });
 

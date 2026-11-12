@@ -5,7 +5,11 @@
   "scripts": {
     "dev": "nodemon server.js",
     "start": "node server.js",
-    "test": "node --test tests/multi-user.test.js tests/stream-parser.test.js tests/streaming.test.js"
+    "test": "node --test tests/multi-user.test.js tests/stream-parser.test.js tests/streaming.test.js tests/llm-latency.test.js tests/chat-latency.test.js tests/usage-limits.test.js",
+    "test:latency": "node --test tests/llm-latency.test.js tests/chat-latency.test.js tests/stream-parser.test.js",
+    "test:usage": "node --test tests/usage-limits.test.js",
+    "cleanup:expired": "node scripts/cleanup-expired.js",
+    "migrate:retention": "node scripts/backfill-retention.js"
   },
   "keywords": [],
   "author": "",

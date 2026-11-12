@@ -58,7 +58,8 @@ const prepareDocumentAnswer = async (
   // STEP 3: Handle no matching results.
   if (!chunks.length) {
     return {
-      fallback: "I couldn't find relevant information in this document.",
+      fallback:
+        "I couldn't find this information in the uploaded PDF. I can answer questions only about the content of this document.",
       context: "",
       sources: [],
     };
@@ -130,6 +131,7 @@ const askDocument = async (
   );
 
   if (prepared.fallback) {
+    await options.onGenerationStart?.();
     return {
       answer: prepared.fallback,
       sources: prepared.sources,
@@ -171,6 +173,7 @@ const streamDocument = async (
   // If no relevant chunks were found,
   // return a completed fallback answer.
   if (prepared.fallback) {
+    await options.onGenerationStart?.();
     await options.onToken?.(prepared.fallback);
 
     return {

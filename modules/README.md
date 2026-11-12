@@ -1,6 +1,6 @@
 # Backend modules
 
-This folder organizes features. It uses CommonJS (`require`, `module.exports`), Express routers and class-based controller instances. Database operations are separated into repositories where the current implementation has them; auth currently accesses its models directly rather than having an auth repository.
+Backend features live here, grouped by responsibility. Each feature exposes an Express router and uses CommonJS (`require`, `module.exports`). Document, chat and RAG modules have repositories; authentication accesses its models directly.
 
 | Folder | Main responsibility | Documentation |
 | --- | --- | --- |
@@ -9,10 +9,11 @@ This folder organizes features. It uses CommonJS (`require`, `module.exports`), 
 | `chat/` | Save conversations and answer questions | [Chat README](chat/README.md) |
 | `rag/` | Retrieve PDF evidence and call AI models | [RAG README](rag/README.md) |
 | `database/` | Define and export MongoDB models | [Database README](database/README.md) |
+| `usage/` | Account quotas, expiry and cleanup | [Usage README](usage/README.md) |
 
 ## Router entry point
 
-[index.js](index.js) mounts `/auth` first. It then applies `requireAuth` and `verifyCsrf` before mounting `/documents`, `/rag` and `/chats`. [app.js](../app.js) mounts this router under `/api`.
+[index.js](index.js) mounts `/auth` first. It then applies `requireAuth` and `verifyCsrf` before mounting `/documents`, `/rag`, `/chats` and `/usage`. [app.js](../app.js) mounts this router under `/api`.
 
 For example, a route written as `/:chatId/stream` inside `chat/index.js` becomes `/api/chats/:chatId/stream`.
 

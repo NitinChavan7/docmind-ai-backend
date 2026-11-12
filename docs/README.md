@@ -1,44 +1,36 @@
-# DocMind backend documentation
+# Backend documentation
 
-Start here when learning or maintaining this existing backend. These guides describe the implementation in this repository, including its current limitations; they do not assume features that have not been built.
-
-## What does "model" mean here?
-
-| Term | Meaning | Guides |
-| --- | --- | --- |
-| Module | A feature folder containing routes, controllers, repositories and services | [Module overview](../modules/README.md) |
-| Database model | A Mongoose schema representing records stored in MongoDB | [Five database models](../modules/database/models/README.md) |
-| AI model | A model served by Ollama for generating text or embedding it | [Ollama model overview](ai-models/README.md) |
+DocMind uses Express for its API, MongoDB for application records, Supabase for PDFs, Qdrant for document search and Groq for answers.
 
 ## Feature guides
 
-- [Authentication](../modules/auth/README.md): registration, password/Google login, JWTs, cookies and refresh sessions.
-- [Documents](../modules/document/README.md): uploading, viewing, parsing, chunking, indexing and deleting PDFs.
-- [Chats](../modules/chat/README.md): candidate conversations, saved messages, JSON answers and streaming answers.
-- [RAG](../modules/rag/README.md): question rewriting, embeddings, vector search and grounded answer generation.
-- [Database](../modules/database/README.md): model exports, collections, ownership and connection setup.
-- [Streaming API](STREAMING.md): exact SSE contract, cancellation/persistence policy and Windows commands.
+| Guide | Covers |
+| --- | --- |
+| [Modules](../modules/README.md) | Routing, layers and startup |
+| [Authentication](../modules/auth/README.md) | Password/Google login, cookies, refresh and logout |
+| [Documents](../modules/document/README.md) | Upload, storage, extraction, indexing and deletion |
+| [Chats](../modules/chat/README.md) | Conversations, history and completed-turn persistence |
+| [RAG](../modules/rag/README.md) | Rewriting, retrieval, context and model calls |
+| [Database](../modules/database/README.md) | Connections and relationships |
+| [Database models](../modules/database/models/README.md) | Fields and indexes for the seven Mongoose models |
+| [AI models](ai-models/README.md) | Groq generation and Qdrant inference |
+| [Prompt engineering](PROMPT_ENGINEERING.md) | Actual templates and how history/context are used |
+| [Streaming](STREAMING.md) | SSE events, cancellation and manual API checks |
+| [Free plan](FREE_PLAN.md) | Quotas, schema changes, migration, retention cleanup and scheduler setup |
 
 ## Supporting code
 
-- [Middleware](../middleware/README.md): authentication, CSRF, origin checks, uploads and document operations.
-- [Configuration](../config/README.md): environment settings, cookie lifetimes and generation limits.
-- [Stream utilities](../utils/README.md): UTF-8/NDJSON/SSE parsing and SSE output.
-- [Manual scripts](../scripts/README.md): CLI streaming and the root connectivity checks.
-- [Tests](../tests/README.md): test files, dependencies and what is simulated.
-- [Libraries](LIBRARIES.md): every direct package in `package.json` and its purpose.
+- [Configuration](../config/README.md)
+- [Middleware](../middleware/README.md)
+- [Stream utilities](../utils/README.md)
+- [Manual diagnostics](../scripts/README.md)
+- [Automated tests](../tests/README.md)
+- [Libraries](LIBRARIES.md)
 
-## How one question moves through the backend
+## Following one question
 
-1. [app.js](../app.js) parses cookies/JSON and checks the request origin.
-2. [modules/index.js](../modules/index.js) requires an active user session and validates CSRF for protected mutations.
-3. The chat controller checks both chat and PDF ownership and loads saved history from MongoDB.
-4. The RAG service rewrites the question, embeds it, searches the selected PDF's chunks, and builds context.
-5. Ollama generates a full answer or streaming deltas from that context and history.
-6. The chat repository journals and saves the completed user/assistant turn. The response includes PDF source references.
+The chat controller verifies the account, chat and document, then loads committed messages from MongoDB. RAG optionally rewrites the question, searches Qdrant with user/document filters, and assembles page-labelled context. Groq generates the answer. The chat repository journals the completed result, saves both messages and updates conversation activity before completion is reported.
 
-## Where data lives
+MongoDB stores `User`, `AuthSession`, `Document`, `Chat` and `Message` records. Supabase holds private PDF objects. Qdrant holds chunk text, metadata and vectors. Local upload/processing files are temporary.
 
-MongoDB stores users, sessions, document metadata, chats and messages. The private `uploads/` directory stores PDF bytes. Chroma stores PDF chunk text, metadata and numeric vectors. Ollama performs model inference; it is not the application's account or conversation database.
-
-Actual secrets belong in `.env` or your deployment's secret storage. Guides use variable names and placeholders, never real passwords, JWTs or OAuth secrets.
+The old local-model guides remain labelled as historical references. Use current cloud setup instructions in the [main README](../README.md).

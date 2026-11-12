@@ -1,67 +1,28 @@
-const mongoose = require("mongoose");
-const { withGenerationSlot } = require("../../chat/services/generation.service");
-
-const { getReadyDocument } = require("../repository");
-
-const { askDocument } = require("../services/rag.service");
+const mongoose = require('mongoose');
+const { randomUUID } = require('crypto');
+const rag = require('../services/rag.service');
+const { withGenerationSlot } = require('../../chat/services/generation.service');
+const { withDocumentOperation } = require('../../document/services/operation.service');
+const { withQuestionQuota } = require('../../usage/usage.service');
 
 class RagController {
-  async askQuestion(req, res) {
-    try {
-      const { documentId, question } = req.body || {};
-
-      // Validate question
-      if (typeof question !== "string" || !question.trim() || question.length > 4000) {
-        return res.status(400).json({
-          success: false,
-          message: "Question is required",
-        });
-      }
-
-      // Validate document ID
-      if (!mongoose.isValidObjectId(documentId)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid document ID",
-        });
-      }
-
-      // Verify PDF is indexed
-      const document = await getReadyDocument(documentId, req.user.id);
-
-      if (!document) {
-        return res.status(404).json({
-          success: false,
-          message: "Document not found or not indexed",
-        });
-      }
-
-      // Call RAG service
-      const result = await withGenerationSlot(req.user.id, () => askDocument(documentId, question.trim()));
-
-      return res.status(200).json({
-        success: true,
-        message: "Answer generated successfully",
-        data: {
-          documentId,
-          question: question.trim(),
-          answer: result.answer,
-          sources: result.sources,
-        },
-      });
-    } catch (error) {
-      if (error.status === 429) return res.status(429).json({ success: false, message: error.message });
-      console.error("RAG API error:", error.name);
-
-      return res.status(500).json({
-        success: false,
-        message: "Failed to generate answer",
-        ...(process.env.NODE_ENV !== "production" && {
-          error: error.message,
-        }),
-      });
+  async askQuestion(req, res, next) {
+    const { documentId, question, requestId = randomUUID() } = req.body || {};
+    if (!mongoose.isObjectIdOrHexString(documentId) || typeof question !== 'string' || !question.trim() || question.length > 4000 || typeof requestId !== 'string' || !/^[\w-]{8,100}$/.test(requestId)) {
+      return res.status(400).json({ success: false, message: 'Valid document, question and request ID required' });
     }
+    try {
+      const result = await withDocumentOperation(req.user.id, documentId, (document, ensureLease) => {
+        if (document.status !== 'ready') throw Object.assign(new Error('Document is not indexed yet'), { status: 409 });
+        return withGenerationSlot(req.user.id, () => withQuestionQuota({ userId: req.user.id, documentId, requestId, question: question.trim() }, async quota => {
+          ensureLease();
+          const answer = await rag.askDocument(documentId, question.trim(), [], { userId: String(req.user.id), ...quota, onGenerationStart: async () => { ensureLease(); await quota.onGenerationStart(); } });
+          ensureLease();
+          return answer;
+        }, { cacheResult: true }));
+      });
+      return res.json({ success: true, message: 'Answer generated successfully', data: { documentId, question: question.trim(), answer: result.answer, sources: result.sources } });
+    } catch (error) { next(error); }
   }
 }
-
 module.exports = new RagController();

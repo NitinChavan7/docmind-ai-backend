@@ -1,28 +1,22 @@
-# Ollama models used by DocMind
+# AI models
 
-These are AI models served by Ollama, not JavaScript packages or MongoDB models. The backend calls them over HTTP using Node's built-in `fetch`.
+Qdrant creates embeddings for document search, and Groq rewrites questions and generates answers. Both models run through hosted services. This repository does not train or fine-tune them.
 
-| Model | Job in this project | Used by | Guide |
+| Job | Provider | Default model | Configuration |
 | --- | --- | --- | --- |
-| `llama3.2:3b` (default) | Clarify questions and generate answer text | `llm.service.js` | [Chat model](llama3.2-3b/README.md) |
-| `nomic-embed-text` | Turn PDF chunks/questions into numeric search vectors | `embedding.service.js` | [Embedding model](nomic-embed-text/README.md) |
+| Rewrite follow-ups and generate answers | Groq | `openai/gpt-oss-20b` | `GROQ_MODEL` |
+| Embed PDF chunks and search questions | Qdrant Cloud Inference | `sentence-transformers/all-minilm-l6-v2` | `QDRANT_EMBEDDING_MODEL` |
 
-## How they work together
+- [Groq chat model](groq/README.md): prompts, completion limits and streaming.
+- [MiniLM embeddings](minilm/README.md): inference inputs, collection compatibility and search.
+- [Prompt engineering](../PROMPT_ENGINEERING.md): how questions, history and PDF context become model messages.
 
 ```text
-Indexing: PDF -> page text -> chunks -> nomic-embed-text -> Chroma vectors
-Question: question/history -> llama3.2:3b rewrite -> nomic-embed-text -> Chroma evidence
-Answer: original question + history + evidence -> llama3.2:3b -> JSON answer or SSE tokens
+Index: PDF -> page text -> chunks -> Qdrant inference -> stored vectors
+Ask: question/history -> optional Groq rewrite -> Qdrant inference/search
+Answer: original question + history + retrieved passages -> Groq -> text/SSE
 ```
 
-Install/pull models on the machine running Ollama, not with `npm install`:
+Changing the chat model leaves stored vectors intact. Changing the embedding model requires a compatible collection and reindexing; matching dimensions alone does not make vectors from different models interchangeable.
 
-```powershell
-ollama pull llama3.2:3b
-ollama pull nomic-embed-text
-ollama list
-```
-
-The backend uses `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`). The chat model is configurable through `OLLAMA_CHAT_MODEL`; the embedding model name is currently hard-coded. Read each guide before changing models, especially before changing a collection's embedding dimensions.
-
-The code does not train or fine-tune these models. It passes context at inference time. It does not implement web search or a general-purpose model-selection UI. Performance and memory requirements depend on the actual Ollama installation, model artifact and hardware; this repository does not measure or guarantee them.
+The [llama3.2:3b](llama3.2-3b/README.md) and [nomic-embed-text](nomic-embed-text/README.md) pages record the previous local setup. They are not current installation requirements.

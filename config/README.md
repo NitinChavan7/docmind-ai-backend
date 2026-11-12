@@ -1,44 +1,47 @@
-# Configuration
+# Backend configuration
 
-These files centralize MongoDB setup, authentication settings and generation limits. Actual values come from environment variables; [server.js](../server.js) loads `.env` with `dotenv` before importing the application. Use [.env.example](../.env.example) as a variable-name template, not a source of real secrets.
+[server.js](../server.js) loads `.env` before importing the app, validates JWT secrets, connects MongoDB and initializes model indexes. Cloud clients are constructed when their modules are imported. Restart the server after changing connection or model settings.
 
-## Functions and dependencies
+| File | Purpose |
+| --- | --- |
+| [db.js](db.js) | Connect Mongoose using `MONGO_URI` |
+| [auth.js](auth.js) | Validate secrets and set cookie options/lifetimes |
+| [generation.js](generation.js) | Read bounded generation settings |
+| [usage-limits.js](usage-limits.js) | Validate all eleven free-plan settings at startup |
+| [qdrant.js](qdrant.js) | Construct the Qdrant REST client |
+| [supabase.js](supabase.js) | Construct the server-side Supabase client; disable persisted/refreshing auth and provide the `ws` transport |
 
-| File/function | Purpose | Dependency |
-| --- | --- | --- |
-| [db.js](db.js): `connectDB()` | Connects using `MONGO_URI`; logs status; rethrows failures | `mongoose` |
-| [auth.js](auth.js): `validateAuthConfig()` | Requires two different JWT secrets, each at least 32 characters | Plain JavaScript |
-| Same file: `cookieBase()` | Returns HttpOnly, SameSite=Lax and production Secure options | `NODE_ENV` |
-| Same file: `accessLifetime`, `refreshLifetime` | Millisecond constants: 15 minutes / seven days | None |
-| [generation.js](generation.js): `integer(name,fallback,max)` (internal) | Reads a positive bounded integer or uses fallback | `process.env` |
-| Same file: `generationTimeoutMs()` | Streaming deadline; default 180000, max 600000 | None |
-| Same file: `maxGenerations()` | In-process total generation cap; default 4, max 100 | None |
-| Same file: `maxUserGenerations()` | In-process user cap; default 1, max 10 | None |
-| Same file: `generationRateLimit()` | JSON/stream requests/minute/IP; default 20, max 120 | None |
+## Environment variables
 
-## Environment variable reference
+| Variable | Default or requirement |
+| --- | --- |
+| `PORT` | `5000` |
+| `NODE_ENV` | Set `production` for Secure cookies and production proxy settings |
+| `MONGO_URI` | Required MongoDB connection URI; local MongoDB or Atlas |
+| `CLIENT_URL` | `http://localhost:5173`; accepts comma-separated allowed origins |
+| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | Two different values, each at least 32 characters |
+| `JWT_ISSUER` | `docmind-ai` |
+| `JWT_AUDIENCE` | `docmind-ai-web` |
+| `GOOGLE_CLIENT_ID` | Optional public Google Web OAuth client ID |
+| `SUPABASE_URL` | Required Supabase project URL |
+| `SUPABASE_SECRET_KEY` | Required server-side Supabase secret |
+| `SUPABASE_BUCKET` | Required private PDF bucket name |
+| `QDRANT_URL`, `QDRANT_API_KEY` | Qdrant cluster URL and API key |
+| `QDRANT_COLLECTION` | `document_chunks_v2` in the active vector service |
+| `QDRANT_EMBEDDING_MODEL` | `sentence-transformers/all-minilm-l6-v2` |
+| `GROQ_API_KEY` | Required for rewriting/generation calls |
+| `GROQ_MODEL` | `openai/gpt-oss-20b` |
+| `GROQ_REASONING_EFFORT` | `low`; accepts `low`, `medium`, `high` for GPT-OSS 20B/120B; omitted for other models |
+| `QUESTION_REWRITE_TIMEOUT_MS` | `8000`; positive integer up to `120000`; timeout falls back to the original question |
+| `GENERATION_TIMEOUT_MS` | `180000`; positive integer up to `600000` |
+| `MAX_CONCURRENT_GENERATIONS` | `4`; positive integer up to `100` |
+| `MAX_USER_GENERATIONS` | `1`; positive integer up to `10` |
+| `GENERATION_RATE_LIMIT` | `20` chat requests/minute/IP; positive integer up to `120` |
 
-| Variable | Default / requirement | Consumer |
-| --- | --- | --- |
-| `PORT` | 5000 | Server listener |
-| `MONGO_URI` | Required for normal startup | MongoDB connector |
-| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | Required, independent, 32+ characters | Token/CSRF services |
-| `JWT_ISSUER` | `docmind-ai` | JWT signing/verification |
-| `JWT_AUDIENCE` | `docmind-ai-web` | JWT signing/verification |
-| `NODE_ENV` | Production cookies become Secure when exactly `production` | Cookie config, error detail behavior |
-| `CLIENT_URL` | `http://localhost:5173`; comma-separated origins accepted | CORS/origin policy |
-| `GOOGLE_CLIENT_ID` | Optional; Google login unavailable when missing | Verified Google ID-token audience; public config endpoint |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Embedding and LLM HTTP services |
-| `OLLAMA_CHAT_MODEL` | `llama3.2:3b` | Rewriting/answer generation |
-| `CHROMA_URL` | `http://127.0.0.1:8000` | Chroma client |
-| `CHROMA_COLLECTION` | `document_chunks` | Vector collection |
-| `GENERATION_TIMEOUT_MS` | 180000 | Streaming controller |
-| `MAX_CONCURRENT_GENERATIONS` | 4 | Shared generation service |
-| `MAX_USER_GENERATIONS` | 1 | Shared generation service |
-| `GENERATION_RATE_LIMIT` | 20 | JSON/stream chat request limiter |
+Generation helpers read settings when called and fall back to defaults for invalid values. Capacity and rate limits are per process; document leases use MongoDB.
 
-There is no configurable embedding-model name in this version: the service uses `nomic-embed-text`. Most service host/model settings are captured when modules load; restart the backend after changing environment values. Generation helper functions read their values when called.
+The checked-in [.env.example](../.env.example) includes current cloud variables and every `FREE_*` default. Quota values must be positive integers; invalid values stop startup. See [the free-plan guide](../docs/FREE_PLAN.md) for the exact local/Render settings, quota semantics, retention backfill and external cleanup scheduler. Ollama/Chroma variables do not configure the active services.
 
-Use HTTPS and appropriate same-site deployment domains for production cookies. Configure a specifically trusted reverse proxy if required; this code does not blindly enable `trust proxy`. Capacity and rate-limit counters are process-local, while document operation leases are in MongoDB.
+Access cookies last 15 minutes; refresh cookies last seven days. Both are HttpOnly and SameSite=Lax, with Secure enabled in production. Use HTTPS and compatible same-site frontend/API routing. [app.js](../app.js) trusts one proxy hop in production and disables proxy trust otherwise; verify the deployed proxy chain.
 
-The other MongoDB helper at [modules/database/config.js](../modules/database/config.js) is not the connector used by the current server startup. See the [database guide](../modules/database/README.md).
+The separate [modules/database/config.js](../modules/database/config.js) connector is not used by normal startup. Secrets belong in local/deployment configuration and must never be exposed through frontend `VITE_` variables.

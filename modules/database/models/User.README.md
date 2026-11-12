@@ -1,8 +1,8 @@
 # User model
 
-Source: [User.js](User.js). Library: `mongoose`. Model name: `User`. Collection: `users`.
+[User.js](User.js) defines the Mongoose `User` model in the `users` collection.
 
-This record identifies an account. It is used by registration/login, Google identity lookup, profile responses and active-user checks in authentication middleware.
+Stores account identity for password or Google sign-in. Authentication controllers create and look up these records; middleware checks that the account still exists.
 
 | Field | Type / validation | Purpose |
 | --- | --- | --- |
@@ -15,7 +15,7 @@ This record identifies an account. It is used by registration/login, Google iden
 
 Mongoose also adds `_id`, timestamps and its normal version field. Indexes enforce unique email and unique Google ID for records whose Google ID is a string (partial index). Missing/null Google IDs do not need to be unique.
 
-There are no model-defined functions. The auth controller calls `User.create`, `findOne`, `findById` and `exists`. For password login it explicitly uses `.select('+passwordHash')`; its public profile helper returns only ID, name, email and provider. `select:false` is a query default, not encryption or an authorization rule.
+The auth controller uses Mongoose methods to create accounts and look up identities. Password login explicitly selects `.select('+passwordHash')`; the public profile contains only `id`, `name`, `email` and `provider`. Other queries leave the hash out by default.
 
 Internal lookup example:
 

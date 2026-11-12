@@ -1,8 +1,8 @@
 # AuthSession model
 
-Source: [AuthSession.js](AuthSession.js). Library: `mongoose`. Model name: `AuthSession`. Collection: `auth_sessions`.
+[AuthSession.js](AuthSession.js) defines the Mongoose `AuthSession` model in the `auth_sessions` collection.
 
-This record makes JWT login sessions revocable. A valid JWT alone is insufficient: authentication also checks that its session exists and has not expired.
+Stores the revocable session behind the authentication cookies. Authentication checks both the JWT and this record, including its expiry.
 
 | Field | Type / validation | Purpose |
 | --- | --- | --- |
@@ -13,7 +13,7 @@ This record makes JWT login sessions revocable. A valid JWT alone is insufficien
 
 The model adds `_id` and timestamps. The session `_id` becomes the signed JWT's `sid`. A unique index covers `tokenHash`; a TTL index on `expiresAt` uses `expireAfterSeconds:0`. TTL deletion can be delayed, so query filters also require `expiresAt > now`.
 
-There are no custom model functions. `createSession` creates the record; `rotateSession` atomically compares/replaces the current hash and remembers its old hash; known old-token reuse revokes the session family. `requireAuth` checks owner/expiry, and logout deletes the current session.
+The token service creates sessions with `createSession`. On refresh, `rotateSession` atomically replaces the current hash and adds the old hash to `usedTokenHashes`. Reusing a previously accepted refresh token deletes the session. `requireAuth` checks the owner and expiry; logout deletes the current session too.
 
 Internal check example:
 

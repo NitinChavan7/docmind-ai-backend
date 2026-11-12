@@ -1,56 +1,129 @@
-# DocMind AI backend
+# DocMind AI - Backend
 
-CommonJS Express API with private PDF storage, MongoDB sessions and candidate-specific conversations.
+DocMind AI lets users upload PDFs, ask questions about their contents and return to saved conversations. This repository contains the Express backend: authentication, private file storage, document indexing and streamed answers with PDF sources.
 
-## Learn the codebase
+Built by **Nitin Chavan** · [View my portfolio](https://nitin-chavan-portfolio.vercel.app/)
 
-Start with the [documentation index](docs/README.md). Each backend module now has a README explaining its files, functions, libraries, routes, data flow and current limits. The [database model index](modules/database/models/README.md) links a separate guide for every MongoDB model, and the [Ollama model index](docs/ai-models/README.md) explains the chat and embedding models. See the [library reference](docs/LIBRARIES.md) for all direct backend dependencies and their purposes.
+## How it works
 
-Authenticated streaming answers are available at `POST /api/chats/:chatId/stream`.
-The existing JSON message endpoint remains supported. See [Streaming API and Windows testing](docs/STREAMING.md) for the SSE event contract, cancellation/persistence policy, limits and exact PowerShell/curl.exe commands.
+```text
+PDF upload -> Supabase Storage -> page text -> overlapping chunks
+           -> Qdrant Cloud Inference -> Qdrant collection
 
-Run `npm install`, copy `.env.example` to `.env` for a new installation, set MongoDB and two independent JWT secrets, then run `npm run dev`. Existing `.env` values are preserved; this implementation has generated local JWT secrets where missing. Never commit `.env` or `uploads/`.
+Question + saved history -> optional question rewrite -> filtered Qdrant search
+                        -> PDF context + original question -> Groq
+                        -> SSE answer -> completed turn saved in MongoDB
+```
 
-The matching frontend is `../docmind-ai-frontend/docmind-ai-frontend`. Run `npm install` and `npm run dev` there. Set `VITE_API_URL=http://localhost:5000` and `VITE_USE_API=true`. The frontend sends cookies, obtains CSRF tokens, refreshes sessions with a shared request promise and a browser lock across tabs, and loads conversations from MongoDB. API mode does not read or write browser chat history. Explicit offline preview (`VITE_USE_API=false`) retains its separate local-storage behavior.
-
-## Authentication
-
-`GET /api/auth/csrf` returns `data.csrfToken` and sets an HttpOnly seed cookie. Send the token as `X-CSRF-Token` on **every mutation**, including login and registration, with the cookie jar preserved. Fetch a fresh CSRF token after changing accounts; tokens are bound to the signed session ID. An expired/missing access token on a protected route returns 401 so clients can refresh before retrying.
-
-| Endpoint | Body / result |
+| Service | Role |
 | --- | --- |
-| POST /api/auth/register | `{name,email,password}`; returns `data.user` |
-| POST /api/auth/login | `{email,password}`; returns `data.user` |
-| POST /api/auth/google | `{credential}` containing a Google ID token |
-| POST /api/auth/refresh | Rotates the refresh cookie |
-| GET /api/auth/me | Returns `data.user` |
-| POST /api/auth/logout | Revokes the session and clears cookies |
+| Express 5 / Node.js | API routes, authentication and streaming |
+| MongoDB / Mongoose | Users, refresh sessions, PDF metadata, chats and messages |
+| Supabase Storage | Private PDF objects |
+| Qdrant Cloud Inference | Embeddings using `sentence-transformers/all-minilm-l6-v2` by default |
+| Qdrant | Chunk text, page metadata and semantic search |
+| Groq | Question rewriting and answers using `openai/gpt-oss-20b` by default |
 
-Access cookies last 15 minutes; refresh cookies last seven days. Sessions store refresh hashes and previously used hashes. Reusing a rotated signed token revokes its session family. Clients must serialize refreshes; the frontend uses Web Locks when available. Clients without Web Locks should avoid concurrent refreshes across tabs because replay detection deliberately fails closed. Logout invalidates access immediately. JWT secrets must contain at least 32 characters and differ. Production cookies require HTTPS and use SameSite=Lax; deploy frontend and API on the same site. `CLIENT_URL` supports comma-separated allowed origins. Configure a specific trusted proxy in `app.js` when deploying behind one.
+The active services do not call Ollama or Chroma. Some older scripts, packages and test fixtures remain from that implementation.
 
-For Google sign-in, create a Google Web OAuth client, allow your frontend JavaScript origin, and set backend `GOOGLE_CLIENT_ID`. `GET /api/auth/config` exposes only this public client ID so the frontend can load it at runtime; frontend `VITE_GOOGLE_CLIENT_ID` remains a compatibility fallback. The Google option appears on login and registration; when no client ID is configured it is disabled with an availability message, and the sign-in API returns 503. Google tokens are verified server-side with the Google library. Matching emails are never silently linked to existing accounts. See [Google's verification guide](https://developers.google.com/identity/gsi/web/guides/verify-google-id-token) and [OWASP's CSRF guidance](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html).
+## Setup
 
-## Documents and conversations
+Use Node.js 22.12+ and npm. You need MongoDB, a private Supabase bucket, a Qdrant collection compatible with the embedding model, and a Groq API key.
 
-All `/api/documents`, `/api/rag`, and `/api/chats` routes require an active session. Upload `file` as multipart PDF to `/api/documents/upload` (10 MB maximum). Process with `POST /api/documents/:documentId/process`. Metadata, PDF file reads (`/:documentId/file` and `/:documentId/view`), indexing, deletion and legacy RAG requests all check ownership in MongoDB. Files are never mounted as a public static directory. Unowned legacy documents stay inaccessible; reupload them after signing in or perform an explicitly reviewed administrative migration. No automatic ownership assignment is performed.
+```powershell
+npm install
+Copy-Item .env.example .env
+```
 
-| Endpoint | Purpose |
+The checked-in `.env.example` includes the cloud settings and free-plan defaults. Fill in your local service configuration:
+
+```dotenv
+PORT=5000
+NODE_ENV=development
+CLIENT_URL=http://localhost:5173
+MONGO_URI=mongodb://127.0.0.1:27017/docmind_ai
+JWT_ACCESS_SECRET=<independent-secret-at-least-32-characters>
+JWT_REFRESH_SECRET=<different-secret-at-least-32-characters>
+SUPABASE_URL=<supabase-project-url>
+SUPABASE_SECRET_KEY=<server-side-secret-key>
+SUPABASE_BUCKET=<private-pdf-bucket>
+QDRANT_URL=<qdrant-cluster-url>
+QDRANT_API_KEY=<qdrant-api-key>
+QDRANT_COLLECTION=document_chunks_v2
+QDRANT_EMBEDDING_MODEL=sentence-transformers/all-minilm-l6-v2
+GROQ_API_KEY=<groq-api-key>
+GROQ_MODEL=openai/gpt-oss-20b
+GOOGLE_CLIENT_ID=
+```
+
+Generate each JWT secret separately:
+
+```powershell
+node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
+npm run dev
+```
+
+`npm start` runs without the development watcher. `GET /api/health` checks that the HTTP app is running; it does not verify all cloud services.
+
+The active vector service defaults to `document_chunks_v2`. The current MiniLM integration expects 384-dimensional vectors and uses owner/document payload filters. Configure a compatible collection and payload indexes for `userId` and `documentId` where required by your cluster. The older `setup-qdrant.js` defaults to a different collection and creates 768-dimensional vectors; it is not suitable for the current MiniLM setup as written.
+
+Keep service keys on the backend. The frontend needs only its API URL and, optionally, the public Google client ID. See [configuration](config/README.md) for the complete variable reference.
+
+## API
+
+All document, chat and RAG routes require an active session. Mutations also require an allowed origin and a session-bound `X-CSRF-Token` obtained from `GET /api/auth/csrf`. Preserve cookies across requests and fetch a new CSRF token after authentication changes.
+
+| Area | Routes |
 | --- | --- |
-| POST /api/chats | `{documentId}` creates a conversation for an owned, indexed PDF |
-| GET /api/chats?documentId=... | Latest 100 conversations for one owned PDF |
-| GET /api/chats/:chatId/messages | Saved messages, chronological within each page |
-| POST /api/chats/:chatId/messages | `{question,requestId}` generates and saves a full turn |
+| Authentication | `GET /api/auth/config`, `/api/auth/csrf`, `/api/auth/me`; `POST /api/auth/register`, `/api/auth/login`, `/api/auth/google`, `/api/auth/refresh`, `/api/auth/logout` |
+| Documents | `POST /api/documents/upload`; `GET /api/documents`, `/api/documents/:id`, `/api/documents/:id/view`, `/api/documents/:id/file`; `POST /api/documents/:id/process`; `DELETE /api/documents/:id` |
+| Chats | `POST /api/chats`; `GET /api/chats?documentId=...` |
+| Messages | `GET /api/chats/:id/messages`; `POST /api/chats/:id/messages`; `POST /api/chats/:id/stream` |
 
-Use a stable UUID `requestId` when retrying a send. Repeated IDs return the saved result and reject a changed question. History always comes from MongoDB. A successful send returns `data.chatId`, `data.userMessage` and `data.assistantMessage` (with compatible `messages`, `question` and `answer` aliases). Questions are limited to 4,000 characters, answers to 20,000. Messages accept `limit=1..100` (default 50) and `before=<oldest message ID>`; `pagination.hasMore` and `pagination.before` support loading older messages.
+Upload multipart field `file` with a PDF up to 10 MiB, process the returned document ID, then create a chat for the ready document. Questions are limited to 4,000 characters and saved answers to 20,000. Message history accepts `limit=1..100` and `before=<message-id>`.
 
-A renewable database lease serializes answering, processing and deletion for each document. Busy operations return 409. A pending-turn journal in the chat lets a later read or send recover interrupted message persistence without requiring a replica-set MongoDB. Model failures leave no user-only turn. Document deletion removes vectors, files, messages and conversations; failed cleanup can be retried. Lease recovery after a crashed process can take up to ten minutes. Request/answer/document text is not logged.
+JSON sends accept `{question,requestId?}`. Reuse the same request ID when retrying the same question. Streaming accepts `{question}` and sends `status`, `meta`, `token` and terminal events over SSE. A complete turn is saved before `done`. Reload history after an interrupted stream before sending the question again. See the [streaming contract](docs/STREAMING.md).
 
-## Validation and deployment scope
+The legacy `POST /api/rag/ask` route remains available and shares the account question quota. Prefer chat endpoints for saved conversation history.
 
-`npm test` uses a temporary MongoDB instance and stubbed external Google/AI/vector calls. It covers registration/login, cookies, CSRF, ownership on all entry points, two candidate histories, idempotency, pagination, interrupted writes, concurrent operations, replay revocation and logout. The first run may download a MongoDB test binary. Frontend tests run with `npm test` in its directory, and its production bundle with `npm run build`.
+## Authentication and data
 
-Email verification, password reset/recovery, authenticated Google account linking, device/session management, distributed rate-limit storage and deployment-specific HTTPS/private persistent storage remain separate production work. Rate limits currently use process memory. Real Google sign-in requires your OAuth credentials; AI indexing and generation require your running Ollama and Chroma services.
+Password login uses bcrypt. Google login verifies an ID token against `GOOGLE_CLIENT_ID`; `/api/auth/config` exposes that public ID to the frontend. Accounts with matching emails are not silently linked.
 
-The completed browser validation used the [Playwright skill](C:/Users/ASUS/.agents/skills/playwright/SKILL.md) and an isolated test MongoDB with deterministic AI responses. It verified registration, real PDF upload/preview, candidate switching, follow-up history, new and reopened conversations, reload persistence, session refresh, two-user isolation, logout/login and the mobile sign-in layout. The backend suite covers 17 scenarios; the frontend suite currently covers 18 tests. External Google and AI services were simulated; live service verification still requires configured credentials and running services.
+Access cookies last 15 minutes and refresh cookies seven days. Refresh tokens rotate, their hashes are stored in MongoDB, and reuse of an old token revokes the session. Logout revokes access through the session record. Cookies are HttpOnly, SameSite=Lax and Secure in production; use HTTPS and compatible same-site frontend/API routing. `CLIENT_URL` accepts comma-separated origins. The app trusts one proxy hop in production; check that against your hosting setup.
 
-Dependency audit: npm currently reports five advisories in the existing default-embedding and development-tool dependency trees. No forced dependency upgrades were applied. Review these before a public deployment.
+MongoDB ownership checks protect documents and chats. Qdrant search/deletion filters include both authenticated `userId` and `documentId`. Supabase object keys use the owner's ID and a generated filename. Local upload and processing files are temporary. Deletion coordinates vectors, stored PDFs, messages, chats and metadata; it can require a retry if one store fails.
+
+## Documentation
+
+- [Free-plan limits, migration and cleanup](docs/FREE_PLAN.md)
+- [Documentation index](docs/README.md)
+- [Module overview](modules/README.md)
+- [Database models](modules/database/models/README.md)
+- [AI models](docs/ai-models/README.md)
+- [Prompt engineering](docs/PROMPT_ENGINEERING.md)
+- [Libraries](docs/LIBRARIES.md)
+- [Automated tests](tests/README.md)
+- [Manual diagnostics](scripts/README.md)
+
+## Free plan
+
+Defaults: five PDFs, 10 MiB per PDF, 30 MiB total storage, 25 pages per PDF, ten conversations, 50 accepted questions per chat, 30 questions per UTC day, five generation admissions per minute and one active generation per account. PDFs and chats expire after 30 days. Backend quotas use MongoDB and also cover SSE and legacy RAG.
+
+`GET /api/usage` returns account usage and the next UTC reset. `DELETE /api/chats/:chatId` frees a conversation slot. Physical retention cleanup requires an external scheduler; none is enabled by this change. Review [the rollout guide](docs/FREE_PLAN.md) before backfilling legacy expiry or running cleanup with `--apply`.
+
+## Response time
+
+Standalone questions skip an extra Groq rewrite call, including when saved history exists. Contextual follow-ups still use rewriting, with an eight-second fallback deadline. GPT-OSS defaults to low reasoning effort; set `GROQ_REASONING_EFFORT=medium` or `high` for complex analysis. Authentication queries run in parallel, and committed chat history has an index matching its pagination. Restart the backend to load these changes and initialize the index.
+
+Run `npm run test:latency` for the isolated latency and persistence checks. These verify call counts, cancellation and correctness with mocked cloud responses; they do not measure hosted-service latency.
+
+## Tests and known limitations
+
+```powershell
+npm test
+```
+
+The suite covers accounts, ownership, persistence, streaming, quota races, retention and cleanup using temporary MongoDB and mocked cloud services. Live service diagnostics require configured credentials and are separate from automated tests.
+
+PDF extraction has no OCR. Character-based chunk limits do not enforce a token budget. Retrieved sources and prompt instructions help ground answers but do not guarantee accuracy. Account quotas, rolling-minute admissions and generation leases are stored in MongoDB. Existing process-local capacity and IP limits also apply. Email verification for local accounts, password recovery and account linking are not implemented.

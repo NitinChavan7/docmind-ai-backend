@@ -1,63 +1,55 @@
-# Retrieval-augmented generation (RAG)
+# Document retrieval and answers
 
-RAG means finding relevant document text before asking an AI model to answer. This module converts a question into a search vector, retrieves evidence from the selected PDF, builds a prompt and calls Ollama. It does not own authentication or save conversations; callers in the chat/document modules handle those responsibilities.
+This module finds relevant PDF passages in Qdrant and asks Groq to answer from them. Chat controllers supply the authenticated user and saved history, then persist completed turns.
 
-## Services and libraries
+## Services
 
-| File | Responsibility | Libraries/APIs |
-| --- | --- | --- |
-| [services/rag.service.js](services/rag.service.js) | Orchestrates rewriting, retrieval, context and answers | Internal services/repository; plain JavaScript |
-| [services/llm.service.js](services/llm.service.js) | Calls Ollama for rewriting and answer generation | Node 20 `fetch`, `AbortController`, `AbortSignal`; NDJSON parser |
-| [services/embedding.service.js](services/embedding.service.js) | Calls Ollama to produce numeric vectors | Node `fetch`, `AbortSignal` |
-| [services/vector.service.js](services/vector.service.js) | Stores/queries/deletes Chroma chunks | `chromadb` (`ChromaClient`), Node `URL` |
-| [repository/index.js](repository/index.js) | Checks ready documents and delegates vector retrieval | Mongoose `Document`, vector service |
-| [controller/index.js](controller/index.js), [index.js](index.js) | Legacy one-shot RAG HTTP route | `express`, `mongoose`, generation slot service |
-
-No Ollama JavaScript SDK is installed or needed here; calls use HTTP directly. Chroma receives supplied embeddings with `embeddingFunction:null`. The installed `@chroma-core/default-embed` package is not used to generate embeddings by these services.
-
-## Orchestration functions: `rag.service.js`
-
-| Function | Inputs | Result / work |
-| --- | --- | --- |
-| `prepareDocumentAnswer(documentId,question,history=[],options={})` | Authorized document ID, question, server-loaded messages; optional signal/status callback | Rewrites question, embeds it, retrieves up to five chunks, sorts by page/chunk and returns `{context,sources}` or `{fallback,context:'',sources:[]}` |
-| `askDocument(documentId,question,history=[])` | Same trusted ID/question/history | Uses shared preparation, generates a complete answer or returns fallback; resolves `{answer,sources}` |
-| `streamDocument(documentId,question,history,options)` | Same plus `signal`, `onStatus`, `onSources`, `onToken` callbacks | Prepares context, reports sources, forwards deltas, accumulates final text and resolves `{answer,sources}` |
-
-The rewritten question is used for retrieval; answer generation receives the original question and saved history. Source records preserve `documentId`, `pageNumber`, `chunkNumber`, `content` and `distance`. Multiple chunks can refer to the same PDF/page; they are evidence chunks, not multiple uploaded documents.
-
-Empty retrieval returns the existing "I couldn't find relevant information in this document" fallback instead of asking the model to guess. Streaming status callbacks run for actual work: `understanding`, `retrieving`, and `generating` only when model answer generation runs.
-
-## Language-model functions: `llm.service.js`
-
-| Function | Purpose and return value |
+| File | Responsibility |
 | --- | --- |
-| `callOllama(messages,{signal}={})` (internal) | POSTs `/api/chat` with `stream:false`, selected model and temperature 0.2; returns trimmed nonempty content |
-| `rewriteQuestion(question,history=[],options={})` | Uses history to clarify spelling/follow-ups; returns a rewritten question capped at 1,000 characters, or the original question on ordinary rewrite failure |
-| `buildAnswerMessages(question,context,history=[])` | Returns system + history + context/question messages; shared by JSON and streaming answers |
-| `generateAnswer(question,context,history=[],options={})` | Calls the non-streaming helper with the shared prompt; resolves answer text |
-| `streamAnswer(question,context,history=[],{signal}={})` | Async generator yielding only valid assistant content deltas from Ollama NDJSON |
+| [rag.service.js](services/rag.service.js) | Rewrite, retrieve, order context and generate an answer |
+| [llm.service.js](services/llm.service.js) | Groq requests, prompt construction and upstream SSE parsing |
+| [embedding.service.js](services/embedding.service.js) | Validate text and create Qdrant inference inputs |
+| [vector.service.js](services/vector.service.js) | Store, search and delete owner-scoped Qdrant chunks |
+| [repository/index.js](repository/index.js) | Ready-document lookup and a retrieval wrapper |
+| [controller/index.js](controller/index.js) | Legacy `/api/rag/ask` handler |
 
-The system prompt asks for grounded facts, treats PDF content as untrusted data and uses conversation memory to understand follow-ups. This is prompt guidance, not proof that a model can never hallucinate; users should check important details against the cited PDF.
+## Retrieval flow
 
-Ollama calls have a 120-second upstream timeout. Streaming combines that with caller cancellation, handles split UTF-8/JSON, requires `done:true`, limits the answer to 20,000 characters and rejects upstream errors, empty answers, truncated streams or length-stopped output. The reader/fetch is cleaned up on success, failure or cancellation. Rewrite fallback does not swallow a caller's cancellation.
+`prepareDocumentAnswer(documentId, question, history, options)` requires `options.userId`. It reports `understanding`, rewrites contextual questions when needed, reports `retrieving`, and searches for five chunks. Retrieval uses both `userId` and `documentId` filters. Results are ordered by page and chunk before context is assembled as `[Source N | Page N]` passages.
 
-## Embedding and vector functions
+The rewritten question is used for search. The original question goes to answer generation. Empty retrieval returns "I couldn't find this information in the uploaded PDF. I can answer questions only about the content of this document." without an answer-model call. Search has no minimum score threshold, so returning chunks does not establish that they answer the question.
 
-`generateEmbeddings(texts,{signal}={})` requires a nonempty text array, POSTs `{model:'nomic-embed-text',input:texts}` to `/api/embed`, checks successful HTTP status and that the number of returned embeddings matches the inputs, then returns a vector array. It does not currently validate every vector's dimension or numeric entries; keep the embedding model consistent with the collection. See the [embedding model guide](../../docs/ai-models/nomic-embed-text/README.md).
+`askDocument` returns `{answer,sources}`. `streamDocument` sends sources through `onSources`, emits `generating` when applicable, forwards text through `onToken`, and returns the complete answer. Options include `signal` and status/source/token callbacks.
 
-| Vector function | What it does |
+## Groq and prompts
+
+`rewriteQuestion` uses up to six valid history messages, capped at 1,000 characters each. It skips the network call without history or when a conservative local check identifies a standalone question. Short and referential follow-ups still use Groq. The rewrite deadline defaults to eight seconds (`QUESTION_REWRITE_TIMEOUT_MS`), with a 512-token completion budget. Failure, timeout or output longer than 600 characters falls back to the original question; caller cancellation is rethrown.
+
+`buildAnswerMessages` adds the grounding system prompt, up to eight valid history messages capped at 2,000 characters each, and the document context/current question. `generateAnswer` requests a full response; `streamAnswer` yields Groq content deltas. Both use temperature 0.2 and a default 2,048-token completion budget.
+
+Groq requests use `GROQ_API_KEY`, `GROQ_MODEL` (default `openai/gpt-oss-20b`) and a 120-second upstream deadline for answers. GPT-OSS 20B/120B use `GROQ_REASONING_EFFORT` (`low` by default; `medium` and `high` are also accepted). Streaming requires the `[DONE]` marker, a `stop` finish reason and nonempty content; it rejects malformed events, incomplete output and answers over 20,000 characters. Its event buffer is capped at 1 MiB. The parser is implemented inside `llm.service.js`.
+
+The answer prompt restricts facts to the current PDF context and uses history only to resolve references. It instructs the model to reject unrelated requests and use an exact fallback when the passages do not support an answer. Partly supported questions should receive only the supported information, with missing details identified. These are prompt instructions; there is no separate answer-verification step. See [prompt engineering](../../docs/PROMPT_ENGINEERING.md) for the actual templates and examples.
+
+## Embeddings and vectors
+
+`createInferenceDocument(text)` returns `{text,model}` for nonempty text up to 600 characters. `prepareEmbeddingDocuments(texts)` validates an array of those inputs. These functions do not return numeric vectors; Qdrant Cloud Inference creates them. The model defaults to `sentence-transformers/all-minilm-l6-v2` and can be set with `QDRANT_EMBEDDING_MODEL`.
+
+| Function | Behavior |
 | --- | --- |
-| `getVectorCollection({signal}={})` | Gets/creates `CHROMA_COLLECTION` with supplied embeddings; uses a signal-bound client for cancellable reads |
-| `storeDocumentChunks(chunks,embeddings)` | Validates matching nonempty arrays and upserts chunk text, vectors and page/document metadata; returns `{storedChunks}` |
-| `searchDocumentChunks(documentId,questionEmbedding,limit=5,options={})` | Queries vectors restricted to the document ID; returns `{id,content,metadata,distance}` results |
-| `deleteDocumentChunks(documentId)` | Removes vectors whose metadata matches that document |
+| `getVectorCollection(options)` | Reads the configured collection; does not create it |
+| `storeDocumentChunks(chunks,userId)` | Deletes existing document vectors, then upserts batches of 16 with inference text and payload metadata |
+| `searchDocumentChunks(documentId,question,limit,options)` | Sends text for inference and filters by authenticated user/document; limit defaults to 5 and is clamped to 1 to 20 |
+| `deleteDocumentChunks(documentId,userId)` | Deletes only points matching both IDs |
 
-Chunk IDs use `${documentId}_page${pageNumber}_chunk${chunkNumber}`. Searches use supplied query embeddings, not auto-generated Chroma embeddings. The RAG repository's `retrieveDocumentContext(documentId,embedding,limit=3,options={})` delegates to vector search; the main RAG preparation explicitly asks for five results. `getReadyDocument(documentId,userId)` checks ownership and `status:'ready'` in MongoDB.
+Point IDs are stable UUIDs derived from document, page and chunk identifiers. Payloads contain `userId`, `documentId`, `pageNumber`, `chunkNumber` and `content`. Search results include `score` and the compatibility value `distance = 1 - score`.
 
-## Legacy route, usage and configuration
+Set `QDRANT_URL`, `QDRANT_API_KEY` and optionally `QDRANT_COLLECTION` (default `document_chunks_v2`). The collection must already match the embedding model. Failed reindexing can leave partial vectors; the document becomes ready only after every batch is confirmed.
 
-`RagController.askQuestion(req,res)` handles POST `/api/rag/ask` with `{documentId,question}`. It validates input, verifies a ready owned document, acquires generation capacity and calls `askDocument`. It returns answer/sources but **does not save chat messages** and does not receive saved chat history. Use `/api/chats/:chatId/messages` or `/stream` for persistent conversation memory.
+Abort signals are checked around Qdrant reads but are not passed to the Qdrant client's query request. Groq fetches do receive cancellation signals.
 
-`OLLAMA_BASE_URL` defaults to `http://127.0.0.1:11434`; `OLLAMA_CHAT_MODEL` defaults to `llama3.2:3b`. `nomic-embed-text` is currently hard-coded. `CHROMA_URL` defaults to `http://127.0.0.1:8000`; collection defaults to `document_chunks`. These values are read when the service modules load; restart after changes.
+## Legacy entry points
 
-There is no web search or dynamic mode router. These low-level services do not validate ownership themselves: the HTTP controller must check the document/chat before calling them. Read the [AI model guides](../../docs/ai-models/README.md) and [streaming guide](../../docs/STREAMING.md) for usage examples.
+The registered `/api/rag/ask` controller verifies the owned ready PDF under its operation lease, supplies authenticated `options.userId` and uses the same daily/minute/concurrency quotas as chat. Optional request IDs support cached result replay. It does not save chat history. See [usage limits](../../docs/FREE_PLAN.md).
+
+The repository's `retrieveDocumentContext` still calls its query argument `embedding`; the vector service now expects question text. New callers should follow the current text-query contract and supply authenticated `options.userId`.

@@ -1,34 +1,35 @@
 # Manual scripts and diagnostics
 
-These scripts help a developer inspect connectivity or consume the streaming API. They are not extra Express routes and are not run by normal server startup.
+Run scripts from the backend root with your local `.env` configured. They are separate from `npm test` and normal server startup.
 
-## Streaming CLI
+## Cloud checks
 
-Source: [stream-chat.js](stream-chat.js). Dependencies: Node 20 `fetch`, `AbortController`, `AbortSignal`, `process` and [parseSse](../utils/stream.js); no additional npm package.
-
-The script reads chat ID/question from command-line arguments and cookies/CSRF from environment variables. Its `cancel()` callback aborts fetch on Ctrl+C. Its async entry function POSTs the question, parses events, prints progress to stderr and text deltas to stdout, and requires a successful `done` before reporting the answer saved. Errors set exit code 1; user cancellation uses 130. Cleanup aborts the controller and removes the SIGINT listener. It has a 210-second client HTTP timeout.
-
-| Variable | Purpose |
+| Script | What it does |
 | --- | --- |
-| `DOCMIND_COOKIE` | Current authenticated chat-URL cookie header |
-| `DOCMIND_CSRF` | Matching session's issued CSRF token |
-| `DOCMIND_API_URL` | Optional API base, default `http://localhost:5000/api` |
+| [test-groq.js](../test-groq.js) | Calls Groq with sample context, first as a full response and then as a stream |
+| [test-qdrant.js](../test-qdrant.js) | Lists collections to check connectivity |
+| [test-qdrant-inference.js](../test-qdrant-inference.js) | Inserts one sample inference point, searches and attempts cleanup of that point |
+| [test-qdrant-delete.js](../test-qdrant-delete.js) | Creates unique diagnostic user/document filter values, verifies zero matches and tests filtered deletion |
+| [test-supabase.js](../test-supabase.js) | Reads the configured bucket and prints its name/public status |
+
+For example: `node test-groq.js` or `node test-qdrant.js`. These commands make live service requests. The inference diagnostic hard-codes `document_chunks_v2` and the default MiniLM model; check those values against your environment first. None of these scripts establishes full application behavior or answer quality.
+
+## Streaming client
+
+[stream-chat.js](stream-chat.js) consumes the authenticated chat SSE API with Node fetch and [parseSse](../utils/stream.js). Set `DOCMIND_COOKIE` and `DOCMIND_CSRF` from a current session. `DOCMIND_API_URL` defaults to `http://localhost:5000/api`.
 
 ```powershell
-# First log in and obtain cookies/CSRF as shown in the streaming guide.
 node scripts/stream-chat.js YOUR_CHAT_ID 'What skills are listed?'
 ```
 
-See [the complete Windows setup](../docs/STREAMING.md) for working authentication/export commands, cancellation and history verification. The CLI does not automatically refresh expired credentials or retry partially received answers.
+The client prints stages to stderr and answer deltas to stdout. It requires a successful `done` event, aborts on Ctrl+C and has a 210-second client timeout. It does not refresh expired credentials or retry interrupted generations. See [streaming commands](../docs/STREAMING.md) for login, cookie export and history checks.
 
-## Root diagnostic scripts
+## Older helpers
 
-| Source/function | What it does | Requirements |
-| --- | --- | --- |
-| [testChroma.js](../testChroma.js): `testChroma()` | Gets/creates the configured collection and prints its name/vector count | `dotenv`, vector service, running Chroma |
-| [testEmbedding.js](../testEmbedding.js): `testEmbedding()` | Embeds two sample strings; prints count, dimension and first five values | `dotenv`, embedding service, running Ollama/model |
-| [testSearch.js](../testSearch.js): `testSearch()` | Embeds a sample question and searches the hard-coded document ID | `dotenv`, embedding/vector services, previously indexed PDF |
+`setup-qdrant.js` currently creates 768-dimensional vectors and defaults to `document_chunks`, while the active MiniLM integration uses a compatible 384-dimensional collection and defaults to `document_chunks_v2`. Do not use it as the current collection setup without updating it.
 
-Run from the project root using `node testEmbedding.js`, `node testChroma.js` or `node testSearch.js`. These are manual connectivity checks, not the `npm test` assertion suite. They catch/log failures and do not provide the same pass/fail guarantees as automated tests.
+`testEmbedding.js` and `testSearch.js` import the removed `generateEmbeddings` function. `testSearch.js` also has an old hard-coded document ID and does not supply the authenticated user required by current vector search. `testChroma.js` calls the current Qdrant collection reader but then expects Chroma's collection/count interface. These helpers need migration before use; the cloud checks above match the active service APIs.
 
-`testSearch.js` contains a specific development document ID; it is not portable test data. It also prints matching chunk contents. Use it only for data you are allowed to inspect and keep such output private. Direct vector service calls bypass the ownership boundary provided by normal authenticated HTTP controllers.
+## Free-plan quotas and retention
+
+See [the free-plan guide](../docs/FREE_PLAN.md) for backend limits, explicit expiry, retryable cleanup, migration commands and scheduler requirements. Uploads are parser-inspected before private storage; quota decisions are persisted in MongoDB. Physical cleanup requires an external scheduler and is not automatically enabled.
