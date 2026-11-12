@@ -14,6 +14,7 @@ The suite uses Node's test runner, Supertest and temporary MongoDB instances. Fi
 | [streaming.test.js](streaming.test.js) | Real Groq-adapter SSE parsing against a local fake provider, event ordering, persistence, cancellation, deadlines and process capacity |
 | [stream-parser.test.js](stream-parser.test.js) | Shared UTF-8, NDJSON/SSE parsing, cancellation and backpressure |
 | [llm-latency.test.js](llm-latency.test.js) | Standalone-call reduction, contextual rewriting, deadlines and reasoning settings |
+| [document-summary.test.js](document-summary.test.js) | Summary intent, owner-scoped overview pagination, context budgets, cancellation, factual-search preservation and empty-context fallback |
 | [chat-latency.test.js](chat-latency.test.js) | Authentication query concurrency, ownership, idempotency, turn persistence and stream errors |
 | [usage-limits.test.js](usage-limits.test.js) | Quota boundaries/races, UTC reset, distributed leases, shared endpoint quotas, retention, cleanup retries and backfill |
 | [helpers/clouds.js](helpers/clouds.js) | In-memory private object storage/vector mocks with injectable failures |

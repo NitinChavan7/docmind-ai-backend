@@ -311,6 +311,41 @@ const searchDocumentChunks = async (
   }));
 };
 
+// Summary requests need document coverage, not nearest-neighbour matches for
+// generic summary words. Scroll remains scoped to the authenticated owner.
+const getDocumentOverviewChunks = async (documentId, { userId, signal } = {}) => {
+  const filter = createDocumentFilter(documentId, userId);
+  const points = [];
+  let offset;
+  // Bound cloud reads even if a malformed index contains excessive chunks.
+  for (let batch = 0; batch < 8; batch++) {
+    signal?.throwIfAborted();
+    const result = await qdrant.scroll(COLLECTION_NAME, {
+      filter, limit: 256, ...(offset !== undefined ? { offset } : {}),
+      with_payload: ['documentId', 'pageNumber', 'chunkNumber', 'content'],
+      with_vector: false,
+    });
+    signal?.throwIfAborted();
+    points.push(...(result.points || []));
+    offset = result.next_page_offset;
+    if (offset === null || offset === undefined) break;
+  }
+  const chunks = points.map(point => ({
+    id: String(point.id), content: String(point.payload?.content || '').trim(),
+    metadata: { documentId: point.payload?.documentId, pageNumber: point.payload?.pageNumber, chunkNumber: point.payload?.chunkNumber },
+  })).filter(chunk => chunk.content).sort((a, b) =>
+    Number(a.metadata.pageNumber || 0) - Number(b.metadata.pageNumber || 0) ||
+    Number(a.metadata.chunkNumber || 0) - Number(b.metadata.chunkNumber || 0));
+  // Short documents (including resumes) fit in full. For longer PDFs, sample
+  // evenly across the source order so the ending is not systematically lost.
+  const budget = 24000;
+  if (chunks.reduce((total, chunk) => total + chunk.content.length, 0) <= budget) return chunks;
+  const largest = Math.max(...chunks.map(chunk => chunk.content.length));
+  const count = Math.min(chunks.length, 48, Math.max(1, Math.floor(budget / largest)));
+  return Array.from({ length: count }, (_, index) =>
+    chunks[count === 1 ? 0 : Math.round(index * (chunks.length - 1) / (count - 1))]);
+};
+
 /**
  * Delete all vectors for one user's document.
  */
@@ -355,5 +390,6 @@ module.exports = {
   getVectorCollection,
   storeDocumentChunks,
   searchDocumentChunks,
+  getDocumentOverviewChunks,
   deleteDocumentChunks,
 };

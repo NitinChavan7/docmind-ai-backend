@@ -17,6 +17,8 @@ This module finds relevant PDF passages in Qdrant and asks Groq to answer from t
 
 `prepareDocumentAnswer(documentId, question, history, options)` requires `options.userId`. It reports `understanding`, rewrites contextual questions when needed, reports `retrieving`, and searches for five chunks. Retrieval uses both `userId` and `documentId` filters. Results are ordered by page and chunk before context is assembled as `[Source N | Page N]` passages.
 
+Explicit summary requests (including key insights, takeaways, highlights and overviews) skip query rewriting and use `getDocumentOverviewChunks`. It scrolls payloads with the same owner/document filters, with at most eight batches of 256 points. Short PDFs are included in full within a 24,000-character text budget; longer PDFs use at most 48 passages sampled across source order, including the beginning and ending. Source page/chunk references remain attached. Summary context may therefore be partial for long PDFs. Specific factual questions retain the five-match semantic search.
+
 The rewritten question is used for search. The original question goes to answer generation. Empty retrieval returns "I couldn't find this information in the uploaded PDF. I can answer questions only about the content of this document." without an answer-model call. Search has no minimum score threshold, so returning chunks does not establish that they answer the question.
 
 `askDocument` returns `{answer,sources}`. `streamDocument` sends sources through `onSources`, emits `generating` when applicable, forwards text through `onToken`, and returns the complete answer. Options include `signal` and status/source/token callbacks.

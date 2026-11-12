@@ -1,6 +1,7 @@
 const llm = require("./llm.service");
 
-const { searchDocumentChunks } = require("./vector.service");
+const { searchDocumentChunks, getDocumentOverviewChunks } = require("./vector.service");
+const { isDocumentSummaryQuestion } = require("./question-intent");
 
 // ---------------------------------------------
 // Validate authenticated document search
@@ -37,7 +38,8 @@ const prepareDocumentAnswer = async (
   // STEP 1: Understand the question.
   await options.onStatus?.("understanding");
 
-  const searchQuestion = await llm.rewriteQuestion(question, history, options);
+  const summaryRequested = isDocumentSummaryQuestion(question);
+  const searchQuestion = summaryRequested ? question : await llm.rewriteQuestion(question, history, options);
 
   signal?.throwIfAborted();
 
@@ -46,10 +48,9 @@ const prepareDocumentAnswer = async (
   // STEP 2: Retrieve chunks from Qdrant Cloud.
   await options.onStatus?.("retrieving");
 
-  const chunks = await searchDocumentChunks(documentId, searchQuestion, 5, {
-    userId,
-    signal,
-  });
+  const chunks = summaryRequested
+    ? await getDocumentOverviewChunks(documentId, { userId, signal })
+    : await searchDocumentChunks(documentId, searchQuestion, 5, { userId, signal });
 
   signal?.throwIfAborted();
 
